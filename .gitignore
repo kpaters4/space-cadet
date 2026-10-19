@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project data (large, re-downloadable)
+data/raw/
+data/processed/
+data/sample/
+data/sample_out/
