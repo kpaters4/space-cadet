@@ -9,7 +9,7 @@ PROCESSED = ROOT / "data" / "processed"
 SW_ALL = RAW / "SW-All.csv"          # CelesTrak space weather, daily 1957-present + forecast
 SATCAT = RAW / "satcat.csv"          # Space-Track satellite catalogue
 DECAY = RAW / "decay.csv"            # Space-Track decay / reentry messages
-GP_HISTORY = RAW / "gp_history.csv"  # Space-Track orbital element history (optional; see below)
+GP_HISTORY = RAW / "gp_history.csv"  # Space-Track orbital element history
 
 # Processed outputs
 SW_DAILY = PROCESSED / "space_weather_daily.csv"

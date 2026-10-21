@@ -1,5 +1,5 @@
 {
-  "_provenance": "Schema reference only -- column names and notes, no data rows. Generated against the fixture in data/sample (python src/make_sample_data.py), which mirrors real Space-Track CSV headers including gp_history, so the column set matches a real run. Regenerate from real data once credentials are set up: python src/build_dataset.py (it overwrites this file in place).",
+  "_provenance": "Schema reference only -- column names and notes, no data rows. Generated against the fixture in data/sample (python src/make_sample_data.py), which mirrors real Space-Track CSV headers including gp_history (required), so the column set matches a real run. Regenerate from real data once credentials are set up: python src/build_dataset.py (it overwrites this file in place).",
   "keys": [
     "norad_cat_id",
     "obs_date",
