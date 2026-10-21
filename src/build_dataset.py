@@ -55,6 +55,7 @@ import pandas as pd
 import space_weather
 from config import (
     DECAY,
+    DECAY_ACTUAL_MSG_TYPES,
     EPOCHS_PER_OBJECT,
     GP_HISTORY,
     MAX_ELEMENT_AGE_DAYS,
@@ -132,6 +133,11 @@ def load_decay(path=DECAY) -> pd.DataFrame:
         if col in df:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=True).dt.tz_localize(None)
     df = df.dropna(subset=["norad_cat_id", "decay_epoch"])
+
+    # Only messages recording a reentry that happened. "Prediction" messages carry
+    # future dates and would mark still-orbiting objects as decayed (PLAN Decision 7).
+    if "msg_type" in df:
+        df = df[df["msg_type"].astype(str).str.strip().str.lower().isin(DECAY_ACTUAL_MSG_TYPES)]
 
     if "msg_epoch" not in df:
         df["msg_epoch"] = pd.NaT

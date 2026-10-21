@@ -39,3 +39,22 @@ PERIGEE_DECAY_WINDOW_DAYS = 30
 MAX_ELEMENT_AGE_DAYS = 45
 
 RANDOM_SEED = 20261019
+
+# --- Modelling targets and panel design (PLAN.md Decisions 1-9) ------------
+# Primary target: will the object reenter within HORIZON_DAYS of the snapshot?
+# Secondary target: log1p days to reentry, only for objects that have reentered
+# by the as-of date (conditional on reentry -- always report next to the primary).
+PRIMARY_TARGET = "reenters_within_horizon"
+SECONDARY_TARGET = "log1p_days_remaining"
+HORIZON_DAYS = 365
+
+# Decay messages that record a reentry that actually happened. Space-Track also
+# emits "Prediction" messages with future dates; those must never mark an
+# object as decayed. Real msg_type values seen in the first pull: Historical, Prediction.
+DECAY_ACTUAL_MSG_TYPES = ("historical",)
+
+# gp_history pull size: test small first, then raise (resumable pull).
+GP_MAX_OBJECTS = 500
+
+# Forward-looking solar means need a forecast at prediction time -- off.
+INCLUDE_FORWARD_SW = False
