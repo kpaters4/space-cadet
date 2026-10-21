@@ -13,9 +13,13 @@ website by hand and drop them in data/raw/ as satcat.csv and decay.csv —
 build_dataset.py reads whatever is there and normalises the column names
 either way.
 
+For orbital-element history (gp_history), see fetch_gp_history.py -- it's a
+separate, much bigger download, run after this one.
+
 API etiquette: Space-Track asks for <=30 requests/minute and <=300/hour, and
 asks that the full catalogue not be pulled more than a few times a day. This
-script makes exactly two requests.
+script makes exactly two requests; login() and credentials() below are reused
+by fetch_gp_history.py so both scripts share one rate-limit-aware session.
 """
 from __future__ import annotations
 
@@ -64,30 +68,37 @@ def credentials() -> tuple[str, str]:
     return identity, password
 
 
-def main() -> None:
+def login() -> requests.Session:
+    """Return an authenticated Space-Track session, or exit with a clear error."""
     identity, password = credentials()
+    session = requests.Session()
+    resp = session.post(LOGIN_URL, data={"identity": identity, "password": password}, timeout=60)
+    resp.raise_for_status()
+    if "Failed" in resp.text or not session.cookies:
+        sys.exit("Space-Track login failed -- check the credentials in .env")
+    return session
+
+
+def download(session: requests.Session, url: str, dest: Path) -> int:
+    """Stream `url` to `dest` atomically; returns the row count written."""
+    with session.get(url, timeout=600, stream=True) as r:
+        r.raise_for_status()
+        tmp = dest.with_suffix(".part")
+        with open(tmp, "wb") as fh:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                fh.write(chunk)
+        tmp.replace(dest)
+    return sum(1 for _ in open(dest, encoding="utf-8", errors="replace")) - 1
+
+
+def main() -> None:
     RAW.mkdir(parents=True, exist_ok=True)
-
-    with requests.Session() as session:
-        resp = session.post(
-            LOGIN_URL, data={"identity": identity, "password": password}, timeout=60
-        )
-        resp.raise_for_status()
-        if "Failed" in resp.text or not session.cookies:
-            sys.exit("Space-Track login failed -- check the credentials in .env")
-        print("logged in to space-track.org")
-
-        for dest, url in QUERIES.items():
-            print(f"fetching {dest.name} ...", flush=True)
-            with session.get(url, timeout=600, stream=True) as r:
-                r.raise_for_status()
-                tmp = dest.with_suffix(".part")
-                with open(tmp, "wb") as fh:
-                    for chunk in r.iter_content(chunk_size=1 << 16):
-                        fh.write(chunk)
-                tmp.replace(dest)
-            rows = sum(1 for _ in open(dest, encoding="utf-8", errors="replace")) - 1
-            print(f"  wrote {dest} ({rows:,} rows, {dest.stat().st_size / 1e6:.1f} MB)")
+    session = login()
+    print("logged in to space-track.org")
+    for dest, url in QUERIES.items():
+        print(f"fetching {dest.name} ...", flush=True)
+        rows = download(session, url, dest)
+        print(f"  wrote {dest} ({rows:,} rows, {dest.stat().st_size / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":

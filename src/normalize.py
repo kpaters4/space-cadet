@@ -41,6 +41,28 @@ DECAY_ALIASES = {
     "country": ["COUNTRY", "COUNTRY_CODE"],
 }
 
+# Space-Track `class/gp_history` -- one row per orbital element set (TLE-
+# equivalent), many per object over its life. This is what lets orbit features
+# be taken *as of* an observation epoch instead of satcat's one terminal
+# snapshot. APOAPSIS/PERIAPSIS are altitude in km, same convention as satcat's
+# APOGEE/PERIGEE.
+GP_HISTORY_ALIASES = {
+    "norad_cat_id": ["NORAD_CAT_ID", "OBJECT_NUMBER", "NORAD"],
+    "epoch": ["EPOCH"],
+    "mean_motion": ["MEAN_MOTION"],
+    "mean_motion_dot": ["MEAN_MOTION_DOT"],
+    "mean_motion_ddot": ["MEAN_MOTION_DDOT"],
+    "bstar": ["BSTAR"],
+    "eccentricity": ["ECCENTRICITY"],
+    "inclination_deg": ["INCLINATION"],
+    "semimajor_axis_km": ["SEMIMAJOR_AXIS"],
+    "period_min": ["PERIOD"],
+    "apogee_km": ["APOAPSIS"],
+    "perigee_km": ["PERIAPSIS"],
+    "element_set_no": ["ELEMENT_SET_NO"],
+    "rev_at_epoch": ["REV_AT_EPOCH"],
+}
+
 
 def _key(name: str) -> str:
     return name.strip().upper().replace(" ", "_").replace("-", "_").replace(".", "_")
