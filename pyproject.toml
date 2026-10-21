@@ -1,0 +1,10 @@
+[project]
+name = "space-cadet"
+version = "0.1.0"
+description = "Data pipeline combining space weather, satcat, and decay datasets to predict space junk reentry timing"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
