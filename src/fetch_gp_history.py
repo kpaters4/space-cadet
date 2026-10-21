@@ -28,10 +28,8 @@ This is still a large, slow download (one or more requests per chunk of
 objects, each returning every element set that object ever had) -- expect it
 to take a while for the full eligible set. Use --limit while testing.
 
-gp_history.csv is entirely optional. build_dataset.py works without it (it
-falls back to satcat's terminal snapshot, with the leakage caveat already
-documented); it just produces better, epoch-accurate orbit features once this
-has been run.
+gp_history.csv is required: build_dataset.py checks for it right alongside
+satcat.csv and decay.csv and will not build the panel without it.
 """
 from __future__ import annotations
 

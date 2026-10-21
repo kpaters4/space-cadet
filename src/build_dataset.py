@@ -1,9 +1,9 @@
-"""Combine the three datasets into a modelling table for the research question:
+"""Combine the four datasets into a modelling table for the research question:
 
     Can we predict how many days a piece of space junk has left before it burns
     up, and does knowing what the Sun is doing make the prediction better?
 
-Inputs  (data/raw/)   SW-All.csv, satcat.csv, decay.csv, gp_history.csv (optional)
+Inputs  (data/raw/)   SW-All.csv, satcat.csv, decay.csv, gp_history.csv
 Outputs (data/processed/)
     objects.csv          one row per catalogued object (the object-level view)
     panel.csv            one row per (object, observation epoch)  <- model on this
@@ -30,13 +30,12 @@ Leakage warnings, read before trusting a score
    change across that object's epochs. Those columns are isolated in the
    `orbit_terminal` feature group.
 
-   The fix: if data/raw/gp_history.csv is present (run fetch_gp_history.py),
-   orbit features are instead taken from the most recent element set *on file
-   at or before* each observation epoch -- the `orbit_asof` feature group.
-   These are real, epoch-accurate orbit features (actual perigee decay rate,
-   actual mean-motion derivative), not a leaky endpoint snapshot. Without
-   gp_history.csv the panel still builds, just without orbit_asof, and the
-   default ablation falls back to the leaky orbit_terminal columns.
+   The fix: orbit features are instead taken from gp_history.csv -- the most
+   recent element set *on file at or before* each observation epoch -- the
+   `orbit_asof` feature group. These are real, epoch-accurate orbit features
+   (actual perigee decay rate, actual mean-motion derivative), not a leaky
+   endpoint snapshot, and that's what the default ablation uses.
+   `orbit_terminal` is kept only for the `*_leaky_orbit` comparison entries.
 2. Forward-looking space weather (`fwd_*`) uses days AFTER the epoch. That is
    legitimate only if a forecast is fed in at inference time (the CelesTrak file
    ships one). It sits in its own feature group so both ways can be tested.
@@ -159,17 +158,14 @@ def load_decay(path=DECAY) -> pd.DataFrame:
     return out[[c for c in wanted if c in out.columns]].reset_index()
 
 
-def load_gp_history(path=GP_HISTORY) -> pd.DataFrame | None:
+def load_gp_history(path=GP_HISTORY) -> pd.DataFrame:
     """Orbital element history (TLE-equivalent), one row per element set.
 
-    Optional: returns None if the file hasn't been fetched (see
-    fetch_gp_history.py). Everything downstream degrades gracefully without
-    it -- the panel just keeps the leaky satcat snapshot instead.
+    Required, same as satcat and decay (main() checks the file exists before
+    calling this). This is what lets orbit features be taken *as of* each
+    observation epoch instead of satcat's one leaky terminal snapshot.
     """
     path = Path(path)
-    if not path.exists():
-        return None
-
     raw = pd.read_csv(path, low_memory=False)
     df, missing = normalize(
         raw, GP_HISTORY_ALIASES, required=("norad_cat_id", "epoch", "apogee_km", "perigee_km")
@@ -403,7 +399,7 @@ def attach_orbit_history(
 
 
 def build_panel(
-    objects: pd.DataFrame, sw: pd.DataFrame, asof: pd.Timestamp, gp: pd.DataFrame | None = None
+    objects: pd.DataFrame, sw: pd.DataFrame, asof: pd.Timestamp, gp: pd.DataFrame
 ) -> pd.DataFrame:
     rng = np.random.default_rng(RANDOM_SEED)
 
@@ -438,8 +434,7 @@ def build_panel(
     panel["log1p_days_remaining"] = np.log1p(panel["days_remaining"].clip(lower=0))
 
     panel = attach_space_weather(panel, sw)
-    if gp is not None:
-        panel = attach_orbit_history(panel, gp)
+    panel = attach_orbit_history(panel, gp)
     panel = panel[panel["obs_date"] >= pd.Timestamp(MIN_EPOCH)].copy()
 
     # A time-ordered split: holding out by epoch date is the only honest test of
@@ -492,54 +487,36 @@ def feature_groups(panel: pd.DataFrame) -> dict:
                   "is_debris", "country")
         if c in cols
     ]
-    have_asof = bool(orbit_asof)
 
-    # Prefer the epoch-accurate orbit (gp_history) for the default ablation;
-    # fall back to the leaky satcat snapshot only if gp_history wasn't fetched.
-    base_clean = orbit_static + ["age_days"] + (orbit_asof if have_asof else orbit_terminal)
+    # The default ablation uses the epoch-accurate orbit (gp_history).
+    base_clean = orbit_static + ["age_days"] + orbit_asof
     base_leaky = orbit_static + orbit_terminal + ["age_days"]
 
     ablation = {
         "baseline_no_sun": base_clean,
         "with_sun_trailing": base_clean + sw_trailing,
         "with_sun_and_forecast": base_clean + sw_trailing + sw_forward,
-    }
-    if have_asof:
-        # Kept for comparison -- this is the leaky version from before
-        # fetch_gp_history.py was run. The gap between this and the
-        # baseline_no_sun score above is roughly how much the old satcat
+        # Kept for comparison against the leaky satcat snapshot -- the gap
+        # between this and baseline_no_sun above is roughly how much that
         # snapshot was quietly helping for the wrong reason.
-        ablation["baseline_no_sun_leaky_orbit"] = base_leaky
-        ablation["with_sun_trailing_leaky_orbit"] = base_leaky + sw_trailing
+        "baseline_no_sun_leaky_orbit": base_leaky,
+        "with_sun_trailing_leaky_orbit": base_leaky + sw_trailing,
+    }
 
     notes = [
+        "orbit_asof comes from gp_history: the orbit as of each epoch, taken "
+        "only from element sets already on file at or before obs_date, so it "
+        "never leaks the future. orbit_terminal is satcat's one terminal "
+        "snapshot -- leaky for decayed objects -- kept only for the "
+        "*_leaky_orbit ablation comparison.",
+        "perigee_decay_rate_km_per_day is negative while an object is losing "
+        "altitude. element_age_days says how stale the matched element set "
+        "was; rows past MAX_ELEMENT_AGE_DAYS have orbit_asof nulled out "
+        "rather than guessed.",
         "space_weather_forward requires a solar forecast at inference time.",
         "Drop event_observed == 0 rows for plain regression; keep them for "
         "survival models.",
     ]
-    if have_asof:
-        notes.insert(
-            0,
-            "orbit_asof comes from gp_history: the orbit as of each epoch, taken "
-            "only from element sets already on file at or before obs_date, so it "
-            "never leaks the future. orbit_terminal is satcat's one terminal "
-            "snapshot -- leaky for decayed objects -- kept only for the "
-            "*_leaky_orbit ablation comparison.",
-        )
-        notes.insert(
-            1,
-            "perigee_decay_rate_km_per_day is negative while an object is losing "
-            "altitude. element_age_days says how stale the matched element set "
-            "was; rows past MAX_ELEMENT_AGE_DAYS have orbit_asof nulled out "
-            "rather than guessed.",
-        )
-    else:
-        notes.insert(
-            0,
-            "orbit_terminal columns are satcat's LAST elements on file; for decayed "
-            "objects they leak the answer. Run fetch_gp_history.py and rebuild to "
-            "replace them with real, epoch-accurate orbit_asof features instead.",
-        )
 
     return {
         "keys": ["norad_cat_id", "obs_date", "epoch_index"],
@@ -612,26 +589,21 @@ def report(objects: pd.DataFrame, panel: pd.DataFrame, asof: pd.Timestamp) -> No
     if sw_cols:
         print(f"  worst space-weather null rate {panel[sw_cols].isna().mean().max():.2%}")
 
-    if "perigee_km_asof" in panel.columns:
-        have = panel["perigee_km_asof"].notna()
-        print(f"  orbit_asof (gp_history) coverage {have.mean():.1%} of rows "
-              f"({have.sum():,}/{len(panel):,})")
-        if have.any():
-            age = panel.loc[have, "element_age_days"]
-            print(f"  element_age_days where matched: median {age.median():.1f}d  "
-                  f"p90 {age.quantile(.9):.1f}d")
-    else:
-        print("  orbit_asof: not built (no gp_history.csv) -- orbit features are "
-              "satcat's leaky terminal snapshot")
+    have = panel["perigee_km_asof"].notna()
+    print(f"  orbit_asof (gp_history) coverage {have.mean():.1%} of rows "
+          f"({have.sum():,}/{len(panel):,})")
+    if have.any():
+        age = panel.loc[have, "element_age_days"]
+        print(f"  element_age_days where matched: median {age.median():.1f}d  "
+              f"p90 {age.quantile(.9):.1f}d")
 
     # Sanity checks that would otherwise rot silently.
     assert (panel.loc[ev, "days_remaining"] >= 0).all(), "negative days_remaining"
     assert panel["age_days"].min() >= 0, "epoch before launch"
     assert not panel.duplicated(["norad_cat_id", "obs_date"]).any(), "duplicate epochs"
-    if "element_age_days" in panel.columns:
-        age = panel["element_age_days"].dropna()
-        assert (age >= 0).all(), "orbit_asof matched a FUTURE element set"
-        assert (age <= MAX_ELEMENT_AGE_DAYS).all(), "stale element set was not nulled out"
+    age = panel["element_age_days"].dropna()
+    assert (age >= 0).all(), "orbit_asof matched a FUTURE element set"
+    assert (age <= MAX_ELEMENT_AGE_DAYS).all(), "stale element set was not nulled out"
     print("\nsanity checks passed")
 
 
@@ -641,7 +613,7 @@ def main(argv: list[str] | None = None) -> None:
         "--raw-dir",
         type=Path,
         default=None,
-        help="directory holding satcat.csv and decay.csv (default: data/raw)",
+        help="directory holding satcat.csv, decay.csv, and gp_history.csv (default: data/raw)",
     )
     ap.add_argument(
         "--out-dir", type=Path, default=None, help="output directory (default: data/processed)"
@@ -651,8 +623,7 @@ def main(argv: list[str] | None = None) -> None:
         "--gp-history",
         type=Path,
         default=None,
-        help="gp_history.csv (default: <raw-dir>/gp_history.csv; optional -- "
-        "orbit_asof features are skipped if it's missing)",
+        help="gp_history.csv (default: <raw-dir>/gp_history.csv)",
     )
     args = ap.parse_args(argv)
 
@@ -663,12 +634,13 @@ def main(argv: list[str] | None = None) -> None:
     objects_path = (out_dir / "objects.csv") if args.out_dir else OBJECTS
     panel_path = (out_dir / "panel.csv") if args.out_dir else PANEL
 
-    missing = [p.name for p in (satcat_path, decay_path) if not p.exists()]
+    missing = [p.name for p in (satcat_path, decay_path, gp_path) if not p.exists()]
     if missing:
         sys.exit(
             f"missing raw input(s) in {satcat_path.parent}: {', '.join(missing)}\n"
-            "Run `python src/fetch_spacetrack.py` (needs a Space-Track account), or\n"
-            "export the catalogue and decay tables from space-track.org by hand.\n"
+            "Run `python src/fetch_spacetrack.py` then `python src/fetch_gp_history.py`\n"
+            "(both need a Space-Track account), or export the catalogue, decay, and\n"
+            "gp_history tables from space-track.org by hand.\n"
             "To smoke-test the pipeline on fake data instead:\n"
             "  python src/make_sample_data.py\n"
             "  python src/build_dataset.py --raw-dir data/sample --out-dir data/sample_out"
@@ -678,9 +650,6 @@ def main(argv: list[str] | None = None) -> None:
     satcat = load_satcat(satcat_path)
     decay = load_decay(decay_path)
     gp = load_gp_history(gp_path)
-    if gp is None:
-        print(f"no gp_history at {gp_path} -- orbit features will use satcat's leaky "
-              "terminal snapshot. Run fetch_gp_history.py for epoch-accurate orbit features.")
 
     # Anchor censoring on the last OBSERVED space weather day, not on "today" and
     # not on the end of the file -- the file's tail is forecast, and following a
