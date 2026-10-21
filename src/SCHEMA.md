@@ -1,7 +1,8 @@
 # Data dictionary
 
-Three raw sources go in, two tables come out. `objects.csv` is the object-level
-view (one row per catalogued object); `panel.csv` is the modelling table.
+Four raw sources go in (one optional), two tables come out. `objects.csv` is
+the object-level view (one row per catalogued object); `panel.csv` is the
+modelling table.
 
 ## Join keys
 
@@ -9,11 +10,13 @@ view (one row per catalogued object); `panel.csv` is the modelling table.
 |---|---|---|
 | satcat | `NORAD_CAT_ID` | one row per object; the spine of the whole thing |
 | decay | `NORAD_CAT_ID` | **many rows per object** — successive reentry messages, collapsed to the latest |
+| gp_history *(optional)* | `NORAD_CAT_ID` + `EPOCH` | **many rows per object** — one per element set; as-of joined to each observation epoch |
 | SW-All | `DATE` | daily; joined to each observation epoch on calendar day |
 
 Space weather has no object key and the Space-Track tables have no date key, so
 the only thing that links them is the observation epoch — which is why the panel
-exists.
+exists. gp_history is the one source that joins on *both* keys: nearest element
+set at or before `obs_date`, per object (`pd.merge_asof(..., by="norad_cat_id")`).
 
 ## objects.csv
 
@@ -76,15 +79,38 @@ measurable on the day — these are the honest predictors.
 | `f107_pct_rank_11y` | where the current flux sits in the last ~11 years, i.e. solar-cycle phase |
 | `fwd_f107_adj_mean_{90,365}d`, `fwd_ap_mean_{90,365}d` | **forward-looking**: the days *after* the epoch. Usable only with a forecast at inference time |
 
+### Orbit features, as of `obs_date` — `orbit_asof` (requires gp_history.csv)
+
+Present only if `data/raw/gp_history.csv` has been fetched (`fetch_gp_history.py`).
+Unlike `orbit_terminal` below, these come from the most recent element set
+*on file at or before* `obs_date` — `pd.merge_asof(..., direction="backward")`
+— so they genuinely vary across an object's epochs and never describe an orbit
+it hadn't reached yet. This is the fix for leakage item 1 below.
+
+| Column | Meaning |
+|---|---|
+| `apogee_km_asof`, `perigee_km_asof`, `period_min_asof`, `eccentricity_asof`, `inclination_deg_asof` | the matched element set's orbit, direct from gp_history |
+| `sma_km_asof`, `mean_alt_km_asof` | derived from the above, same formulas as the `objects.csv` columns |
+| `regime_asof` | LEO / ELLIPTICAL / MEO / GEO_PLUS / UNKNOWN, classified from the as-of orbit — compare to the (leaky) `regime` in `orbit_terminal` |
+| `mean_motion`, `mean_motion_dot`, `bstar` | straight from gp_history: revs/day, its drift, and the drag term |
+| `perigee_decay_rate_km_per_day` | trailing slope of perigee over the prior `PERIGEE_DECAY_WINDOW_DAYS` (default 30d), using only earlier element sets. Negative = losing altitude. Null if there's no earlier element inside the window |
+| `element_age_days` | `obs_date - element_epoch` — how stale the matched element set was. Rows older than `MAX_ELEMENT_AGE_DAYS` (default 45d) have every `*_asof` column and this one set to null rather than stretched over a gap |
+
 ## Leakage — the part that decides whether a score means anything
 
 1. **`orbit_terminal` columns** (`apogee_km`, `perigee_km`, `period_min`,
-   `sma_km`, `eccentricity`, `mean_alt_km`). satcat stores the *last* elements
-   on file, not elements as of `obs_date`. For a decayed object that is its
-   final, already-decaying orbit, so these partly encode the answer and are
-   constant across all of an object's epochs. A model fit on them will look far
-   better than it is. Either drop them, or replace them with Space-Track
-   `gp_history` elements at each epoch — the proper fix, noted in the README.
+   `sma_km`, `eccentricity`, `mean_alt_km`, `regime`). satcat stores the *last*
+   elements on file, not elements as of `obs_date`. For a decayed object that
+   is its final, already-decaying orbit, so these partly encode the answer and
+   are constant across all of an object's epochs. A model fit on them will look
+   far better than it is.
+
+   **Fixed by `orbit_asof` above**, if gp_history.csv has been fetched.
+   `feature_groups.json`'s default ablation (`baseline_no_sun`,
+   `with_sun_trailing`, `with_sun_and_forecast`) uses `orbit_asof` when it's
+   available and falls back to `orbit_terminal` otherwise; the
+   `*_leaky_orbit` ablation entries keep the old leaky version around
+   specifically so you can measure how much it was inflating the score.
 2. **`fwd_*` columns** use future days. Fine *if* you feed a solar forecast at
    inference time; cheating otherwise.
 3. **`leakage_never_use_as_features`** in `feature_groups.json` lists columns
@@ -96,3 +122,7 @@ measurable on the day — these are the honest predictors.
    right test for "would this have worked on junk we hadn't seen yet", but it
    lets one object appear in two splits. For a strictly object-disjoint split,
    group on `norad_cat_id` instead.
+6. **gp_history coverage isn't 100%.** Rows before an object's first element
+   set, or past `MAX_ELEMENT_AGE_DAYS` since its last one, have null
+   `orbit_asof`. Check `element_age_days` and the null rate before assuming
+   every row has it — `report()` in build_dataset.py prints the coverage.
