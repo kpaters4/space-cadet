@@ -219,8 +219,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# project data (large, re-downloadable)
+# project data (large, re-downloadable, or under a no-redistribution license)
 data/raw/
-data/processed/
+data/processed/*
 data/sample/
 data/sample_out/
+# ...except the feature-group manifest: no data in it, just column names, and
+# it's useful documentation of the panel schema without running the pipeline.
+!data/processed/feature_groups.json
