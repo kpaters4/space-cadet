@@ -11,14 +11,14 @@ Idea: A short arcade-style game where you're a cadet with limited space shots an
 | [CelesTrak Space Weather](https://celestrak.org/SpaceData/#:~:text=CSV%20starting%201957%20Oct%2001) | daily solar flux (F10.7) and geomagnetic indices (Ap/Kp), 1957-10-01 → present, plus a forecast to 2041 | public download → `data/raw/SW-All.csv` |
 | [Space-Track Decay/Reentry](https://www.space-track.org/#decay) | when each object actually came down — **the labels** | free account required |
 | [Satellite Catalogue](https://www.space-track.org/#catalog) | one row per object: launch date, orbit, type, radar cross-section — **the features** | free account required |
-| Space-Track `gp_history` *(optional, recommended)* | orbital element history — one row per element set per object, across its life | free account required |
+| Space-Track `gp_history` | orbital element history — one row per element set per object, across its life | free account required |
 
 The first three join through one idea: satcat is the spine (`NORAD_CAT_ID`),
 decay supplies the event, and space weather attaches by calendar day to an
 *observation epoch* — "what we would have known on this date". Space weather has
 no object key and the Space-Track tables have no date key, so without that epoch
-there is nothing to join on. `gp_history` is optional but fixes the biggest
-weakness in the other three: see [Orbit features](#orbit-features-optional-but-recommended) below.
+there is nothing to join on. `gp_history` fixes the biggest weakness in the
+other three: see [Orbit features](#orbit-features) below.
 
 ## Setup
 
@@ -37,14 +37,14 @@ or export the catalogue and decay tables from the website by hand into
 `data/raw/satcat.csv` and `data/raw/decay.csv`. The loader normalises the
 different header spellings Space-Track uses, so either route works.
 
-Then, optionally but recommended, the orbital element history:
+Then the orbital element history:
 
 ```bash
 python src/fetch_gp_history.py
 ```
 
 This is a separate, bigger download, which is why it's a second step — see
-[Orbit features](#orbit-features-optional-but-recommended) for why it's worth running anyway.
+[Orbit features](#orbit-features) for why it matters.
 
 ## Build
 
@@ -69,7 +69,7 @@ python src/build_dataset.py --raw-dir data/sample --out-dir data/sample_out
 
 Full column reference: [`src/SCHEMA.md`](src/SCHEMA.md).
 
-## Orbit features (optional, but recommended)
+## Orbit features
 
 satcat only gives one snapshot of each object's orbit: the *last* values on
 file. For a decayed object that's its final, already-decaying orbit — a
@@ -84,15 +84,15 @@ launched on/after `MIN_EPOCH`, in config.py — and `build_dataset.py` then
 looks up each observation epoch's orbit from whichever element set was most
 recently on file *at or before* that epoch (`orbit_asof`). That's a real,
 epoch-accurate feature set: actual perigee decay rate, actual mean-motion
-derivative, never a value from the object's future.
+derivative, never a value from the object's future. This is the single
+biggest available improvement to this dataset's honesty, which is why
+`feature_groups.json`'s default ablation uses `orbit_asof`.
 
-It's optional — the pipeline runs fine without it, falling back to the leaky
-`orbit_terminal` snapshot — but it's the single biggest available improvement
-to this dataset's honesty, which is why `feature_groups.json`'s default
-ablation uses `orbit_asof` whenever it's present and only falls back to
-`orbit_terminal` when it isn't. (The `*_leaky_orbit` ablation entries keep the
-old version around specifically so you can measure how much it was inflating
-the score.)
+`build_dataset.py` requires `gp_history.csv` just like it requires `satcat.csv`
+and `decay.csv` — it checks for all three up front and refuses to build the
+panel if any is missing. `orbit_terminal` stays in the panel alongside
+`orbit_asof`, purely so the `*_leaky_orbit` ablation entries can measure how
+much the leaky snapshot would have been inflating the score.
 
 ## Why a panel instead of one row per object
 
@@ -116,10 +116,10 @@ compare on the `test` split, and the gap *is* the answer:
 
 | Set | Features |
 |---|---|
-| `baseline_no_sun` | orbit + size + age only (`orbit_asof` if gp_history was fetched, else the leaky `orbit_terminal`) |
+| `baseline_no_sun` | orbit (`orbit_asof`) + size + age only |
 | `with_sun_trailing` | + solar/geomagnetic history up to the epoch |
 | `with_sun_and_forecast` | + forward-looking solar means (needs a forecast at inference time) |
-| `baseline_no_sun_leaky_orbit`, `with_sun_trailing_leaky_orbit` | *(only present if gp_history was fetched)* the same two, but with `orbit_terminal` instead of `orbit_asof` — compare against `baseline_no_sun` to see how much the leaky snapshot was inflating the score |
+| `baseline_no_sun_leaky_orbit`, `with_sun_trailing_leaky_orbit` | the same two, but with `orbit_terminal` instead of `orbit_asof` — compare against `baseline_no_sun` to see how much the leaky snapshot was inflating the score |
 
 Suggested target: `log1p_days_remaining` — the raw label spans days to decades.
 Suggested metric: median absolute error in log space, or a survival
@@ -127,13 +127,12 @@ concordance index if you keep the censored rows.
 
 ## Known limitations — read before trusting a number
 
-1. **The orbit columns leak, unless you've run fetch_gp_history.py.**
-   satcat's `APOGEE`/`PERIGEE`/`PERIOD` are the *last* values on file. For an
-   object that has already come down, that is its final decaying orbit — a
-   feature that has seen the answer, and one that never changes across that
-   object's epochs. They're isolated in the `orbit_terminal` feature group.
-   `orbit_asof`, from `gp_history`, is the real fix (see above) and is what
-   the default ablation uses when it's available.
+1. **`orbit_terminal` leaks.** satcat's `APOGEE`/`PERIGEE`/`PERIOD` are the
+   *last* values on file. For an object that has already come down, that is
+   its final decaying orbit — a feature that has seen the answer, and one
+   that never changes across that object's epochs. They're isolated in the
+   `orbit_terminal` feature group; `orbit_asof`, from `gp_history`, is the
+   real fix (see above) and what the default ablation uses.
 2. **gp_history coverage isn't total.** An epoch before an object's first
    element set, or more than `MAX_ELEMENT_AGE_DAYS` after its last one, has
    null `orbit_asof`. Check `element_age_days` and the coverage percentage
@@ -156,7 +155,7 @@ src/fetch_spacetrack.py  authenticated download of satcat + decay
 src/fetch_gp_history.py  authenticated download of gp_history, scoped to eligible objects
 src/normalize.py         canonical column names across Space-Track's header variants
 src/space_weather.py     clean SW-All.csv, derive trailing solar/geomagnetic features
-src/build_dataset.py     join the sources -> objects.csv + panel.csv (+ orbit_asof if available)
+src/build_dataset.py     join the sources -> objects.csv + panel.csv (incl. orbit_asof)
 src/make_sample_data.py  fake data (incl. gp_history) for smoke-testing without credentials
 src/SCHEMA.md            full data dictionary
 ```
