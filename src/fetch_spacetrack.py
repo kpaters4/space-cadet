@@ -13,16 +13,14 @@ website by hand and drop them in data/raw/ as satcat.csv and decay.csv —
 build_dataset.py reads whatever is there and normalises the column names
 either way.
 
-For orbital-element history (gp_history), see fetch_gp_history.py -- it's a
-separate, much bigger download, run after this one.
+For orbital-element history (gp_history), use fetch_gp_history_b2.py to upload batches to Backblaze B2.
 
 API etiquette: Space-Track asks for <=30 requests/minute and <=300/hour, and
-asks that the full catalogue not be pulled more than a few times a day. This
-script makes exactly two requests; login() and credentials() below are reused
-by fetch_gp_history.py so both scripts share one rate-limit-aware session.
+asks that the full catalogue not be pulled more than a few times a day. This script makes exactly two requests.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -54,8 +52,8 @@ def load_dotenv(path: Path = ROOT / ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-def credentials() -> tuple[str, str]:
-    load_dotenv()
+def credentials(env_file: Path | None = None) -> tuple[str, str]:
+    load_dotenv(env_file or ROOT / ".env")
     identity = os.environ.get("SPACETRACK_IDENTITY")
     password = os.environ.get("SPACETRACK_PASSWORD")
     if not identity or not password:
@@ -68,9 +66,9 @@ def credentials() -> tuple[str, str]:
     return identity, password
 
 
-def login() -> requests.Session:
+def login(env_file: Path | None = None) -> requests.Session:
     """Return an authenticated Space-Track session, or exit with a clear error."""
-    identity, password = credentials()
+    identity, password = credentials(env_file)
     session = requests.Session()
     resp = session.post(LOGIN_URL, data={"identity": identity, "password": password}, timeout=60)
     resp.raise_for_status()
@@ -91,11 +89,19 @@ def download(session: requests.Session, url: str, dest: Path) -> int:
     return sum(1 for _ in open(dest, encoding="utf-8", errors="replace")) - 1
 
 
-def main() -> None:
-    RAW.mkdir(parents=True, exist_ok=True)
-    session = login()
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--raw-dir", type=Path, default=RAW,
+                    help="directory for satcat.csv and decay.csv (default: data/raw)")
+    ap.add_argument("--env-file", type=Path, default=None,
+                    help="Space-Track credentials file (default: project .env or environment)")
+    args = ap.parse_args(argv)
+
+    args.raw_dir.mkdir(parents=True, exist_ok=True)
+    session = login(args.env_file)
     print("logged in to space-track.org")
-    for dest, url in QUERIES.items():
+    for default_dest, url in QUERIES.items():
+        dest = args.raw_dir / default_dest.name
         print(f"fetching {dest.name} ...", flush=True)
         rows = download(session, url, dest)
         print(f"  wrote {dest} ({rows:,} rows, {dest.stat().st_size / 1e6:.1f} MB)")

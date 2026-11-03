@@ -357,6 +357,185 @@ _GP_FEATURE_RENAME = {
 }
 
 
+def attach_orbit_history_b2(
+    panel: pd.DataFrame,
+    conn,
+    parquet_glob: str,
+    max_age_days: float = MAX_ELEMENT_AGE_DAYS,
+) -> pd.DataFrame:
+    """Attach as-of orbit features in small remote Parquet groups.
+
+    Small groups bound DuckDB memory use. union_by_name also tolerates a few
+    header-only or nonstandard exports without aborting the complete build.
+    """
+    from b2_storage import b2_settings, s3_client
+
+    bucket = parquet_glob.removeprefix("s3://").split("/", 1)[0]
+    settings = b2_settings()
+    client = s3_client(settings)
+    paginator = client.get_paginator("list_objects_v2")
+    keys = [
+        item["Key"]
+        for page in paginator.paginate(Bucket=bucket, Prefix="gp_history/batches/")
+        for item in page.get("Contents", [])
+        if item["Key"].endswith(".parquet")
+    ]
+    if not keys:
+        raise RuntimeError(f"No gp_history Parquet batches found in B2 bucket {bucket!r}")
+
+    conn.execute("SET memory_limit='1GB'")
+    conn.execute("SET preserve_insertion_order=false")
+    rows = panel.reset_index(drop=True)
+    rows["_panel_row"] = np.arange(len(rows), dtype=np.int64)
+    conn.register("_panel_observations", rows[["_panel_row", "norad_cat_id", "obs_date"]])
+    feature_cols = [
+        "apogee_km", "perigee_km", "period_min", "eccentricity",
+        "inclination_deg", "mean_motion", "mean_motion_dot", "bstar",
+        "perigee_decay_rate_km_per_day",
+    ]
+    best_epoch = np.full(len(rows), np.datetime64("NaT"), dtype="datetime64[ns]")
+    best_values = {col: np.full(len(rows), np.nan, dtype=np.float64) for col in feature_cols}
+    skipped_groups: list[str] = []
+    empty_groups: list[str] = []
+    group_size = 1
+    groups = [keys[i:i + group_size] for i in range(0, len(keys), group_size)]
+    try:
+        print(f"Joining panel to {len(keys):,} remote gp_history batches in groups of {group_size}...", flush=True)
+        for position, key_group in enumerate(groups, 1):
+            paths = [f"s3://{bucket}/{key}" for key in key_group]
+            path_sql = "[" + ", ".join("'" + path.replace("'", "''") + "'" for path in paths) + "]"
+            try:
+                result = conn.execute(
+                    f"""
+                    WITH raw_history AS (
+                        SELECT
+                            TRY_CAST(NORAD_CAT_ID AS BIGINT) AS norad_cat_id,
+                            TRY_CAST(EPOCH AS TIMESTAMP) AS epoch,
+                            TRY_CAST(GP_ID AS BIGINT) AS gp_id,
+                            TRY_CAST(MEAN_MOTION AS DOUBLE) AS mean_motion,
+                            TRY_CAST(MEAN_MOTION_DOT AS DOUBLE) AS mean_motion_dot,
+                            TRY_CAST(BSTAR AS DOUBLE) AS bstar,
+                            TRY_CAST(ECCENTRICITY AS DOUBLE) AS eccentricity,
+                            TRY_CAST(INCLINATION AS DOUBLE) AS inclination_deg,
+                            TRY_CAST(PERIOD AS DOUBLE) AS period_min,
+                            TRY_CAST(APOAPSIS AS DOUBLE) AS apogee_km,
+                            TRY_CAST(PERIAPSIS AS DOUBLE) AS perigee_km
+                        FROM read_parquet({path_sql}, union_by_name=true)
+                        WHERE TRY_CAST(NORAD_CAT_ID AS BIGINT) IS NOT NULL
+                          AND TRY_CAST(EPOCH AS TIMESTAMP) IS NOT NULL
+                    ),
+                    needed_history AS (
+                        SELECT h.* FROM raw_history h
+                        WHERE EXISTS (
+                            SELECT 1 FROM _panel_observations p
+                            WHERE p.norad_cat_id = h.norad_cat_id
+                        )
+                    ),
+                    deduplicated AS (
+                        SELECT * FROM needed_history
+                        QUALIFY ROW_NUMBER() OVER (
+                            PARTITION BY norad_cat_id, epoch
+                            ORDER BY gp_id DESC NULLS LAST
+                        ) = 1
+                    ),
+                    history AS (
+                        SELECT *,
+                            FIRST_VALUE(perigee_km) OVER (
+                                PARTITION BY norad_cat_id ORDER BY epoch
+                                RANGE BETWEEN INTERVAL 30 DAYS PRECEDING AND CURRENT ROW
+                                EXCLUDE CURRENT ROW
+                            ) AS prior_perigee_km,
+                            FIRST_VALUE(epoch) OVER (
+                                PARTITION BY norad_cat_id ORDER BY epoch
+                                RANGE BETWEEN INTERVAL 30 DAYS PRECEDING AND CURRENT ROW
+                                EXCLUDE CURRENT ROW
+                            ) AS prior_epoch
+                        FROM deduplicated
+                    ),
+                    derived AS (
+                        SELECT *,
+                            CASE
+                                WHEN prior_epoch IS NOT NULL AND epoch > prior_epoch
+                                THEN (perigee_km - prior_perigee_km)
+                                     / (DATE_DIFF('microsecond', prior_epoch, epoch) / 86400000000.0)
+                                ELSE NULL
+                            END AS perigee_decay_rate_km_per_day
+                        FROM history
+                    ),
+                    batch_observations AS (
+                        SELECT p.* FROM _panel_observations p
+                        WHERE EXISTS (
+                            SELECT 1 FROM raw_history h
+                            WHERE h.norad_cat_id = p.norad_cat_id
+                        )
+                    )
+                    SELECT
+                        p._panel_row,
+                        h.epoch,
+                        h.apogee_km,
+                        h.perigee_km,
+                        h.period_min,
+                        h.eccentricity,
+                        h.inclination_deg,
+                        h.mean_motion,
+                        h.mean_motion_dot,
+                        h.bstar,
+                        h.perigee_decay_rate_km_per_day
+                    FROM batch_observations AS p
+                    ASOF LEFT JOIN derived AS h
+                      ON p.norad_cat_id = h.norad_cat_id
+                     AND p.obs_date >= h.epoch
+                    """
+                ).df()
+            except Exception as exc:
+                if "not found in FROM clause" not in str(exc):
+                    raise
+                row_count = conn.execute(f"SELECT COUNT(*) FROM read_parquet({path_sql})").fetchone()[0]
+                bad = ", ".join(key.rsplit("/", 1)[-1] for key in key_group)
+                if row_count == 0:
+                    empty_groups.append(bad)
+                else:
+                    skipped_groups.append(bad)
+                    print(f"  warning: skipped incompatible nonempty Parquet group: {bad} ({row_count:,} rows)", flush=True)
+                continue
+            if not result.empty:
+                result = result.dropna(subset=["epoch"])
+                if not result.empty:
+                    panel_idx = result["_panel_row"].to_numpy(dtype=np.int64)
+                    epochs = result["epoch"].to_numpy(dtype="datetime64[ns]")
+                    newer = np.isnat(best_epoch[panel_idx]) | (epochs > best_epoch[panel_idx])
+                    if newer.any():
+                        target_rows = panel_idx[newer]
+                        best_epoch[target_rows] = epochs[newer]
+                        for col in feature_cols:
+                            values = pd.to_numeric(result[col], errors="coerce").to_numpy(dtype=np.float64)
+                            best_values[col][target_rows] = values[newer]
+            if position % 20 == 0 or position == len(groups):
+                print(f"  processed {min(position * group_size, len(keys)):,}/{len(keys):,} B2 batches", flush=True)
+    finally:
+        conn.unregister("_panel_observations")
+
+    if empty_groups:
+        print(f"Skipped {len(empty_groups)} empty legacy Parquet batches (zero rows).", flush=True)
+    if skipped_groups:
+        print(f"Warning: {len(skipped_groups)} incompatible groups were skipped; their orbit features will be null.", flush=True)
+    rows["epoch"] = pd.to_datetime(best_epoch)
+    for col in feature_cols:
+        rows[_GP_FEATURE_RENAME[col]] = best_values[col]
+    merged = rows
+    merged["element_age_days"] = (merged["obs_date"] - merged["epoch"]).dt.total_seconds() / 86400
+    merged["regime_asof"] = classify_regime(merged["perigee_km_asof"], merged["apogee_km_asof"])
+    merged["sma_km_asof"] = (merged["apogee_km_asof"] + merged["perigee_km_asof"]) / 2 + EARTH_RADIUS_KM
+    merged["mean_alt_km_asof"] = (merged["apogee_km_asof"] + merged["perigee_km_asof"]) / 2
+    stale = merged["element_age_days"].gt(max_age_days)
+    asof_cols = [
+        "apogee_km_asof", "perigee_km_asof", "period_min_asof", "eccentricity_asof",
+        "inclination_deg_asof", "mean_motion", "mean_motion_dot", "bstar",
+        "perigee_decay_rate_km_per_day", "regime_asof", "sma_km_asof",
+        "mean_alt_km_asof", "element_age_days",
+    ]
+    merged.loc[stale, asof_cols] = np.nan
+    return merged.drop(columns=["_panel_row", "epoch"]).reset_index(drop=True)
 def attach_orbit_history(
     panel: pd.DataFrame, gp: pd.DataFrame, max_age_days: float = MAX_ELEMENT_AGE_DAYS
 ) -> pd.DataFrame:
@@ -399,7 +578,12 @@ def attach_orbit_history(
 
 
 def build_panel(
-    objects: pd.DataFrame, sw: pd.DataFrame, asof: pd.Timestamp, gp: pd.DataFrame
+    objects: pd.DataFrame,
+    sw: pd.DataFrame,
+    asof: pd.Timestamp,
+    gp: pd.DataFrame | None,
+    gp_history_conn=None,
+    gp_history_glob: str | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(RANDOM_SEED)
 
@@ -434,7 +618,10 @@ def build_panel(
     panel["log1p_days_remaining"] = np.log1p(panel["days_remaining"].clip(lower=0))
 
     panel = attach_space_weather(panel, sw)
-    panel = attach_orbit_history(panel, gp)
+    if gp_history_conn is None:
+        panel = attach_orbit_history(panel, gp)
+    else:
+        panel = attach_orbit_history_b2(panel, gp_history_conn, gp_history_glob)
     panel = panel[panel["obs_date"] >= pd.Timestamp(MIN_EPOCH)].copy()
 
     # A time-ordered split: holding out by epoch date is the only honest test of
@@ -620,6 +807,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     ap.add_argument("--sw-all", type=Path, default=SW_ALL, help="CelesTrak SW-All.csv")
     ap.add_argument(
+        "--gp-history-source", choices=("local", "b2"), default="local",
+        help="read gp_history from a local CSV (default) or private B2 Parquet objects",
+    )
+    ap.add_argument(
+        "--env-file", type=Path, default=None,
+        help="private env file with B2 credentials when --gp-history-source b2",
+    )
+    ap.add_argument(
         "--gp-history",
         type=Path,
         default=None,
@@ -634,13 +829,14 @@ def main(argv: list[str] | None = None) -> None:
     objects_path = (out_dir / "objects.csv") if args.out_dir else OBJECTS
     panel_path = (out_dir / "panel.csv") if args.out_dir else PANEL
 
-    missing = [p.name for p in (satcat_path, decay_path, gp_path) if not p.exists()]
+    required_paths = [satcat_path, decay_path] + ([gp_path] if args.gp_history_source == "local" else [])
+    missing = [p.name for p in required_paths if not p.exists()]
     if missing:
         sys.exit(
             f"missing raw input(s) in {satcat_path.parent}: {', '.join(missing)}\n"
-            "Run `python src/fetch_spacetrack.py` then `python src/fetch_gp_history.py`\n"
-            "(both need a Space-Track account), or export the catalogue, decay, and\n"
-            "gp_history tables from space-track.org by hand.\n"
+            "Fetch satcat and decay with `python src/fetch_spacetrack.py`; fetch gp_history to B2\n"
+            "with `python src/fetch_gp_history_b2.py`, or provide a local gp_history.csv.\n"
+
             "To smoke-test the pipeline on fake data instead:\n"
             "  python src/make_sample_data.py\n"
             "  python src/build_dataset.py --raw-dir data/sample --out-dir data/sample_out"
@@ -649,7 +845,15 @@ def main(argv: list[str] | None = None) -> None:
     sw_daily, _ = space_weather.build(args.sw_all)
     satcat = load_satcat(satcat_path)
     decay = load_decay(decay_path)
-    gp = load_gp_history(gp_path)
+    gp_history_conn = None
+    gp_history_glob = None
+    if args.gp_history_source == "local":
+        gp = load_gp_history(gp_path)
+    else:
+        from b2_storage import connect_b2_history
+
+        gp_history_conn, gp_history_glob = connect_b2_history(args.env_file)
+        gp = None
 
     # Anchor censoring on the last OBSERVED space weather day, not on "today" and
     # not on the end of the file -- the file's tail is forecast, and following a
@@ -658,7 +862,11 @@ def main(argv: list[str] | None = None) -> None:
     asof = pd.Timestamp(sw_daily.loc[sw_daily["source"].isin(["OBS", "INT"]), "date"].max()).normalize()
 
     objects = build_objects(satcat, decay, asof)
-    panel = build_panel(objects, sw_daily, asof, gp)
+    panel = build_panel(
+        objects, sw_daily, asof, gp, gp_history_conn, gp_history_glob
+    )
+    if gp_history_conn is not None:
+        gp_history_conn.close()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     objects.to_csv(objects_path, index=False)
@@ -673,3 +881,15 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
