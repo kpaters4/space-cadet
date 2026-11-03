@@ -227,3 +227,8 @@ data/sample_out/
 # ...except the feature-group manifest: no data in it, just column names, and
 # it's useful documentation of the panel schema without running the pipeline.
 !data/processed/feature_groups.json
+
+# Local dashboard datasets and verification artifacts
+data/exact_training_sample/
+tmp/
+output/

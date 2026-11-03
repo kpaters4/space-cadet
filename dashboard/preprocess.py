@@ -1,24 +1,7 @@
-"""Cleaning and preprocessing for the Space Cadet EDA.
-
-Everything the dashboard does to the raw files lives here; the source CSVs and
-the rest of the repo are never modified. Pure pandas, no Streamlit, so it can be
-run on its own:
-
-    uv run python dashboard/preprocess.py     # prints the cleaning log
-
-The reserved test split is never kept: panel.csv is read in chunks and test rows
-are discarded as they are read, and AS_OF (the "today" for every object-level
-calculation) is the last non-test observation date, so a reentry or launch that
-happens in the test period is invisible here. Each step is recorded in a log of
-(step, rows/columns affected, what happened).
-"""
-from pathlib import Path
-
-import numpy as np
+"""Prepare a sample for display without changing the source table or labels."""
 import pandas as pd
-
-PROCESSED = Path(__file__).resolve().parents[1] / "data" / "processed"
-RAW = PROCESSED.parent / "raw"
+from reservation import assert_no_reserved_rows
+DEEP_SPACE_KM = 100_000
 
 PANEL_COLS = [
     "norad_cat_id", "obs_date", "split", "object_type", "regime", "country", "rcs_size",
@@ -31,136 +14,36 @@ PANEL_COLS = [
 LEAKY = {"perigee_km", "apogee_km", "mean_alt_km", "eccentricity", "inclination_deg"}
 
 
-def _reserve_cutoff():
-    """Last observation date outside the test split (test is strictly later)."""
-    s = pd.read_csv(PROCESSED / "panel.csv", usecols=["obs_date", "split"], parse_dates=["obs_date"])
-    return s.loc[s["split"] != "test", "obs_date"].max().normalize()
 
-
-AS_OF = _reserve_cutoff()
-DEEP_SPACE_KM = 100_000  # apogee beyond this is lunar/solar-transfer territory, not an Earth-orbit regime
-
-
-def top_or_other(col, n=12):
-    keep = col.value_counts().head(n).index
-    return col.where(col.isin(keep), "OTHER")
-
-
-def load_panel():
-    cols = PANEL_COLS + ["decay_date"]
-    kept, n_test = [], 0
-    for chunk in pd.read_csv(PROCESSED / "panel.csv", usecols=cols, low_memory=False,
-                             parse_dates=["obs_date"], chunksize=200_000):
-        is_test = chunk["split"] == "test"
-        n_test += int(is_test.sum())
-        kept.append(chunk[~is_test])
-    df = pd.concat(kept, ignore_index=True)
-    df["decay_date"] = pd.to_datetime(df["decay_date"], errors="coerce")
-    log = [("panel: test-split rows discarded while reading", n_test, "reserved; never held in memory or shown"),
-           ("panel: rows loaded (train + valid)", len(df), f"cutoff {AS_OF:%Y-%m-%d}, last non-test observation")]
-
-    n = int((df["obs_date"] > AS_OF).sum())
-    df = df[df["obs_date"] <= AS_OF]
-    log.append(("panel: observations dated after today dropped", n, "an observation can't be in the future"))
-
-    unconfirmed = df["decay_date"] > AS_OF
-    n = int(unconfirmed.sum())
-    df.loc[unconfirmed, ["event_observed", "days_remaining", "log1p_days_remaining"]] = [0, np.nan, np.nan]
-    log.append(("panel: reentries after the cutoff reset to 'not fallen'", n,
-                "label becomes censored; keeps outcomes from the test period out of view"))
-    df = df.drop(columns="decay_date")
-
-    const = [c for c in df.columns if c not in ("event_observed",) and df[c].nunique(dropna=True) <= 1]
-    df = df.drop(columns=const)
-    log.append(("panel: constant columns dropped", len(const), ", ".join(const) or "none"))
-
-    df["regime"] = df["regime"].fillna("UNKNOWN")
-    df["rcs_size"] = df["rcs_size"].fillna("UNKNOWN")
-    df["country"] = top_or_other(df["country"].fillna("UNKNOWN"))
-    df["deep_space"] = df["apogee_km"] > DEEP_SPACE_KM
-    log.append(("panel: rows flagged deep-space (apogee > 100,000 km)", int(df["deep_space"].sum()),
-                "kept, hidden by default from the sidebar toggle"))
-    split_rows = df["split"].value_counts().to_dict()
-    split_objs = df.groupby("split", observed=True)["norad_cat_id"].nunique().to_dict()
-    for c in ("object_type", "regime", "country", "split"):
-        df[c] = df[c].astype("category")
-    return df, split_rows, split_objs, log
-
-
-def load_objects():
-    o = pd.read_csv(PROCESSED / "objects.csv", low_memory=False)
-    log = [("objects: rows loaded", len(o), "one row per catalogued object")]
-    for c in ("launch_date", "decay_date"):
-        o[c] = pd.to_datetime(o[c], errors="coerce")
-    n = int(o["launch_date"].isna().sum())
-    o = o.dropna(subset=["launch_date"])
-    log.append(("objects: no launch date dropped", n, ""))
-    n = int((o["launch_date"] > AS_OF).sum())
-    o = o[o["launch_date"] <= AS_OF]
-    log.append(("objects: launched after the cutoff dropped", n, "launched during the test period"))
-    dup = int(o["norad_cat_id"].duplicated().sum())
-    o = o.drop_duplicates("norad_cat_id")
-    log.append(("objects: duplicate ids dropped", dup, ""))
-
-    # A reentry only counts if it has happened. Future dates are predictions: treat as still in orbit.
-    fell = o["decay_date"].notna() & (o["decay_date"] <= AS_OF)
-    n_future = int((o["decay_date"] > AS_OF).sum())
-    n_pred = int((o["msg_type"] == "Prediction").sum())
-    o["decay_predicted"] = o["msg_type"].eq("Prediction")
-    o["decay_date"] = o["decay_date"].where(fell)
-    o["event"] = fell.astype(int)
-    log.append(("objects: reentry dates in the future set to 'in orbit'", n_future, "predicted dates not yet reached"))
-    log.append(("objects: reentries that rest on a 'Prediction' message", n_pred,
-                "kept (flagged `decay_predicted`); dates already passed"))
-
-    end = o["decay_date"].fillna(AS_OF)
-    o["life_days"] = (end - o["launch_date"]).dt.days.clip(lower=0)
-    n0 = int(((o["life_days"] == 0) & (o["event"] == 1)).sum())
-    log.append(("objects: same-day reentries (life = 0 d)", n0,
-                "kept for survival curves; excluded from log-lifetime plots"))
-
-    o["launch_year"] = o["launch_date"].dt.year
-    o["decay_year"] = o["decay_date"].dt.year
-    o["launch_decade"] = (o["launch_year"] // 10 * 10).astype(str) + "s"
-
-    n_rcs = int(o["rcs_size"].isna().sum())
-    o["rcs_size"] = o["rcs_size"].fillna("UNKNOWN")
-    log.append(("objects: missing radar-size class labelled UNKNOWN", n_rcs, ""))
-    o["country_raw"] = o["country"]
-    o["country"] = top_or_other(o["country"].fillna("UNKNOWN"))
-    log.append(("objects: rare country codes grouped as OTHER", int((o["country"] == "OTHER").sum()),
-                "top 12 owners kept"))
-    const = [c for c in o.columns if o[c].nunique(dropna=True) <= 1]
-    o = o.drop(columns=const)
-    log.append(("objects: constant columns dropped", len(const), ", ".join(const) or "none"))
-
-    no_orbit = o[["apogee_km", "perigee_km", "inclination_deg"]].isna().any(axis=1)
-    o["orbit_valid"] = ~no_orbit
-    log.append(("objects: missing orbit elements", int(no_orbit.sum()), "kept; left out of orbit plots only"))
-    o["deep_space"] = o["apogee_km"] > DEEP_SPACE_KM
-    log.append(("objects: deep-space orbits (apogee > 100,000 km)", int(o["deep_space"].sum()),
-                "kept, hidden by default from the sidebar toggle"))
-    return o, log
-
-
-def solar_monthly():
-    """Monthly mean of the 81-day flux, from panel rows up to today."""
-    s_ = pd.concat(
-        c[c["split"] != "test"].drop(columns="split")
-        for c in pd.read_csv(PROCESSED / "panel.csv", usecols=["obs_date", "split", "f107_adj_mean_81d"],
-                             low_memory=False, parse_dates=["obs_date"], chunksize=200_000)).dropna()
-    s_ = s_[s_["obs_date"] <= AS_OF]
-    m = s_.groupby(s_["obs_date"].dt.to_period("M"))["f107_adj_mean_81d"].mean()
-    m.index = m.index.to_timestamp()
-    return m.sort_index()
-
-
-def gp_coverage():
-    g = pd.read_csv(RAW / "gp_history.csv", usecols=["NORAD_CAT_ID", "EPOCH"])
-    return g["NORAD_CAT_ID"].nunique(), len(g), g["EPOCH"].min()[:10], g["EPOCH"].max()[:10]
-
-
-if __name__ == "__main__":
-    _, _, _, plog = load_panel()
-    _, olog = load_objects()
-    print(pd.DataFrame(plog + olog, columns=["step", "affected", "what happened"]).to_string(index=False))
+def prepare(raw):
+    required = PANEL_COLS + ['launch_date', 'decay_date']
+    missing = sorted(set(required) - set(raw.columns))
+    if missing:
+        raise ValueError('Missing columns: ' + ', '.join(missing))
+    df = raw.copy()
+    n_test = int(df['split'].eq('test').sum())
+    df = df.loc[df['split'].isin(['train', 'valid'])].copy()
+    if df.empty:
+        raise ValueError('No training or validation observations are available.')
+    for col in ['obs_date', 'launch_date', 'decay_date']:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
+    if df[['obs_date', 'launch_date']].isna().any().any():
+        raise ValueError('Observation and launch dates must be valid.')
+    assert_no_reserved_rows(df)
+    text_cols = {'norad_cat_id', 'obs_date', 'split', 'object_type', 'regime', 'country', 'rcs_size'}
+    for col in set(PANEL_COLS) - text_cols:
+        df[col] = pd.to_numeric(df[col], errors='raise')
+    for col in ['object_type', 'regime', 'country', 'rcs_size']:
+        df[col] = df[col].fillna('UNKNOWN')
+    df['deep_space'] = df['apogee_km'].gt(DEEP_SPACE_KM)
+    panel = df[PANEL_COLS + ['deep_space']].copy()
+    panel['launch_year'] = df['launch_date'].dt.year
+    objs = df.sort_values('obs_date').drop_duplicates('norad_cat_id', keep='last').copy()
+    objs['event'] = objs['event_observed'].astype(int)
+    objs['launch_year'] = objs['launch_date'].dt.year
+    # Known sample outcomes are preserved; this is descriptive, not a model evaluation cutoff.
+    as_of = max(df['obs_date'].max(), df['decay_date'].max()) if df['decay_date'].notna().any() else df['obs_date'].max()
+    log = [('Test rows excluded', n_test, 'Only train/valid observations displayed'),
+           ('Sample rows loaded', len(panel), 'Original outcomes preserved; constant columns retained'),
+           ('Sample objects', len(objs), 'One latest observation per sampled object; no full catalogue loaded')]
+    return panel, objs, as_of, log

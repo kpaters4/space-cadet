@@ -179,3 +179,7 @@ Everything else stays local-only, for three different reasons:
 Rule of thumb: if it came from Space-Track (even indirectly), it doesn't leave
 this machine. If it's just large and reproducible, regenerate it instead of
 committing it. Schema-only files with no data in them are fair game.
+
+## Supabase dashboard on Modal
+
+See [dashboard setup and deployment](dashboard/README.md) for the Supabase-backed sample dashboard, exact notebook final-test reservation, and Modal deployment instructions.

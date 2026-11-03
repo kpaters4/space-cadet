@@ -1,10 +1,10 @@
 """Space Cadet -- data audit dashboard for the orbital-debris reentry data.
 
-Run:  uv run --with streamlit --with plotly streamlit run dashboard/app.py
+Run: streamlit run dashboard/app.py (set Supabase environment variables first)
 Preprocessing lives in dashboard/preprocess.py; the data dictionary in dashboard/dictionary.py.
 
 Uses train and valid rows only: the reserved test split is discarded while loading.
-The earlier exploratory tabs are kept in dashboard/app_explorer_full.py.
+Object summaries are derived from the uploaded sample rather than a separate catalogue.
 """
 import numpy as np
 import pandas as pd
@@ -121,22 +121,27 @@ def explain(what, read, why):
                 f'<b class="h">WHY IT MATTERS</b>{why}</div>', unsafe_allow_html=True)
 
 
-from preprocess import (AS_OF, DEEP_SPACE_KM, LEAKY, PANEL_COLS, gp_coverage as _gp_coverage, load_objects as _load_objects,
-                        load_panel as _load_panel, solar_monthly as _solar_monthly)
-
-load_panel = st.cache_data(show_spinner="Loading and cleaning panel (first run reads ~400 MB)...")(_load_panel)
-load_objects = st.cache_data(show_spinner="Loading and cleaning objects...")(_load_objects)
-solar_monthly = st.cache_data(_solar_monthly)
-gp_coverage = st.cache_data(_gp_coverage)
-
-
+from preprocess import prepare, LEAKY
+from source import fetch_panel
 from dictionary import build_dictionary
+from reservation import RESERVED_TEST
 
-panel, split_rows, split_objs, panel_log = load_panel()
-objs, objs_log = load_objects()
-n_test_reserved = int(panel_log[0][1])
+@st.cache_data(ttl=300, show_spinner="Reading sample from Supabase...")
+def load_data():
+    return fetch_panel()
 
-panel["launch_year"] = (panel["obs_date"] - pd.to_timedelta(panel["age_days"], unit="D")).dt.year
+if st.sidebar.button("Refresh data"):
+    load_data.clear()
+try:
+    raw = load_data()
+    panel, objs, AS_OF, panel_log = prepare(raw)
+except (ValueError, RuntimeError, OSError) as exc:
+    st.error(str(exc))
+    st.stop()
+objs_log = []
+n_test_reserved = RESERVED_TEST['rows']
+st.info("Training sample of reentered objects. These charts describe the sample, not the full orbital population. Known outcomes are preserved.")
+
 panel["age_band"] = pd.cut(panel["age_days"] / 365.25, [-0.01, 1, 3, 10, 25, 100],
                            labels=["under 1 yr", "1-3 yrs", "3-10 yrs", "10-25 yrs", "over 25 yrs"])
 
@@ -150,8 +155,8 @@ def colors_for(groups):
 
 # ----------------------------------------------------------------- sidebar
 st.sidebar.markdown("### 🛰️ FILTERS")
-st.sidebar.caption(f"Data through **{AS_OF:%Y-%m-%d}** (train + valid). "
-                   f"The test split ({n_test_reserved:,} rows) is reserved and not loaded.")
+st.sidebar.caption(f"Sample outcomes through **{AS_OF:%Y-%m-%d}**. "
+                   f"Final test: {n_test_reserved:,} observations reserved by the classification notebook; not loaded here.")
 types = sorted(objs["object_type"].dropna().unique())
 sel_types = st.sidebar.multiselect("Object type", types, default=[t for t in types if t != "PAYLOAD"],
                                    help="Payloads are hidden by default (junk-only view); add them to compare.")
@@ -161,10 +166,10 @@ sizes = [s for s in ["SMALL", "MEDIUM", "LARGE", "UNKNOWN"] if s in set(objs["rc
 sel_sizes = st.sidebar.multiselect("Radar size class", sizes, default=sizes,
                                    help="Radar cross-section class; the only stand-in for physical size.")
 yr_lo, yr_hi = int(objs["launch_year"].min()), int(objs["launch_year"].max())
-sel_years = st.sidebar.slider("Launch years", yr_lo, yr_hi, (1990, yr_hi))
+sel_years = st.sidebar.slider("Launch years", yr_lo, yr_hi, (yr_lo, yr_hi)) if yr_lo < yr_hi else (yr_lo, yr_hi)
 no_deep = st.sidebar.checkbox("Hide deep-space orbits (apogee > 100,000 km)", True,
                               help="Lunar and escape-type orbits stretch every altitude axis.")
-sel_splits = st.sidebar.multiselect("Panel split (rows)", ["train", "valid"], default=["train", "valid"],
+sel_splits = st.sidebar.multiselect("Panel split (rows)", sorted(panel["split"].unique()), default=sorted(panel["split"].unique()),
                                     help="Which reserved-safe splits feed the row-level plots.")
 
 o = objs[objs["object_type"].isin(sel_types) & objs["regime"].isin(sel_regimes) & objs["rcs_size"].isin(sel_sizes)
@@ -188,19 +193,17 @@ with tabs[0]:
     st.markdown(f"""
 <div class="readout">
 <div><span>Panel rows (train + valid)</span><strong>{len(panel):,}</strong></div>
-<div><span>Panel columns</span><strong>{panel.shape[1] - 2}</strong></div>
+<div><span>Uploaded columns</span><strong>{raw.shape[1]}</strong></div>
 <div><span>Objects in panel</span><strong>{panel['norad_cat_id'].nunique():,}</strong></div>
-<div><span>Catalogued objects</span><strong>{len(objs):,}</strong></div>
-<div><span>Test rows reserved</span><strong>{n_test_reserved:,}</strong></div>
+<div><span>Sampled objects</span><strong>{len(objs):,}</strong></div>
+<div><span>Final test rows reserved</span><strong>{n_test_reserved:,}</strong></div>
 </div>""", unsafe_allow_html=True)
     sp = (panel.groupby("split", observed=True)
           .agg(rows=("norad_cat_id", "size"), objects=("norad_cat_id", "nunique"),
                first_obs=("obs_date", "min"), last_obs=("obs_date", "max")))
     sp["first_obs"], sp["last_obs"] = sp["first_obs"].dt.date, sp["last_obs"].dt.date
-    sp.loc["test (reserved, not loaded)"] = [n_test_reserved, None, None, None]
     st.dataframe(sp.rename_axis("split"), width="content")
-    st.caption("Time-based split on `obs_date`: test is the most recent period and is never used for "
-               "cleaning rules, filters or plots here. Only its row count is shown.")
+    st.caption(f"The table describes this upload. Separately, the classification notebook reserves {n_test_reserved:,} final-test rows from {RESERVED_TEST['objects']:,} objects (event_observed = 1 and split = test). These are excluded from all dashboard charts and summaries.")
     with st.expander("New to space? Quick glossary"):
         st.markdown("""
 - **Reentry:** an object sinks low enough to hit the thick air, burn up and leave orbit.
@@ -213,17 +216,17 @@ with tabs[0]:
 
 # ----------------------------------------------------------------- dictionary
 with tabs[1]:
-    st.subheader("Data dictionary: cleaned panel")
-    st.caption("Type, % missing and ranges are computed from the loaded data (train + valid, after cleaning). "
-               "Descriptions and notes are written by hand in `dashboard/dictionary.py`.")
-    dd = build_dictionary(panel.drop(columns=["launch_year", "age_band"]))
+    st.subheader("Data dictionary: uploaded sample")
+    st.caption("All original uploaded columns. Supabase types describe database storage; pandas dtypes describe the values loaded into Python. "
+               "float8 means double precision and accepts decimal-form numbers. A count or 0/1 flag can remain discrete even when stored as float8.")
+    dd = build_dictionary(raw)
     st.dataframe(dd, hide_index=True, width="stretch", height=640)
     st.download_button("Download dictionary (CSV)", dd.to_csv(index=False), "data_dictionary.csv", "text/csv")
 
 # ----------------------------------------------------------------- plots
 with tabs[2]:
     st.caption(f"All plots follow the sidebar filters. Currently {len(p):,} observation rows "
-               f"({p['norad_cat_id'].nunique():,} objects) and {len(o):,} catalogued objects selected.")
+               f"({p['norad_cat_id'].nunique():,} objects) and {len(o):,} sampled objects selected.")
     if p.empty or o.empty:
         st.info("No data matches the current filters. Widen the sidebar selection.")
         st.stop()
@@ -237,7 +240,8 @@ with tabs[2]:
     norm1 = c.checkbox("Normalise each group to 100%", True, key="n1", disabled=view1 == "Cumulative share")
     top1 = d.slider("Max groups", 2, 10, 6, key="t1", disabled=grp1 == "(none)")
     fell = p[(p["event_observed"] == 1) & (p["days_remaining"] >= 1)]
-    edges = np.logspace(0, np.log10(max(fell["days_remaining"].max(), 10)), 50)
+    max_days = fell["days_remaining"].max() if not fell.empty else 10
+    edges = np.logspace(0, np.log10(max(max_days, 10)), 50)
     mid = np.sqrt(edges[:-1] * edges[1:])
     if grp1 == "(none)":
         groups = [("all selected rows", fell["days_remaining"])]
@@ -259,8 +263,8 @@ with tabs[2]:
     fig.update_layout(height=430, barmode="overlay", hovermode="x unified", legend=dict(orientation="h", y=1.12))
     show(fig)
     cens = 1 - p["event_observed"].mean()
-    st.caption(f"Only rows whose object reentered by {AS_OF:%Y-%m-%d} can be shown; the other {cens:.0%} of selected rows "
-               "have no days-remaining value yet. The curve is therefore skewed towards objects that fall quickly.")
+    st.caption(f"{cens:.0%} of selected rows have no observed reentry. This sample was selected from reentered objects; "
+               "its distribution does not describe all tracked objects.")
 
     # ---- 2. reentry share within horizon
     st.markdown("### 2. Share of objects reentering within a time window")
@@ -284,9 +288,9 @@ with tabs[2]:
         fig.update_layout(showlegend=False, xaxis_title=grp2.replace("_", " "), yaxis_title=f"share reentering within {horizon} days",
                           yaxis_tickformat=".0%")
         show(fig)
-        st.caption(f"Share of observations whose object reentered within {horizon} days. Only rows with a fully "
+        st.caption(f"Share of sampled observations whose object reentered within {horizon} days. Only rows with a fully "
                    f"elapsed window (observed at least {horizon} days before {AS_OF:%Y-%m-%d}) are counted, and "
-                   "objects that never fell count as misses.")
+                   "this selected sample contains only objects with observed reentry.")
 
     # ---- 3. feature vs time to reentry
     st.markdown("### 3. How features relate to days remaining")
@@ -359,7 +363,7 @@ with tabs[2]:
                    "Descriptive only: catalogue growth also moves reentry counts.")
 
     # ---- 5. tracked population over time
-    st.markdown("### 5. Tracked objects in orbit over time")
+    st.markdown("### 5. Sampled objects in orbit over time")
     a, b = st.columns(2)
     grp5 = a.selectbox("Stack by", ["object_type", "regime", "rcs_size", "country"], key="g5",
                        format_func=lambda s: s.replace("_", " "))
@@ -395,21 +399,16 @@ with tabs[3]:
           .rename(columns={"index": "column"}).sort_values("% missing", ascending=False))
     st.dataframe(mt, hide_index=True, width="stretch")
 
-    n_gp, rows_gp, gp_lo, gp_hi = gp_coverage()
-    if n_gp < 1000:
-        st.warning(f"`gp_history.csv` currently holds only **{n_gp} objects** ({rows_gp:,} element sets, "
-                   f"{gp_lo} to {gp_hi}). That is a small test pull, so the `*_asof` orbit features are almost empty.")
-    else:
-        st.caption(f"`gp_history.csv`: {n_gp:,} objects, {rows_gp:,} element sets, {gp_lo} to {gp_hi}.")
+    st.caption("Raw GP history is not part of this upload. The Data dictionary tab documents all original uploaded columns and their Supabase types.")
     st.warning("The orbit columns in this table (`perigee_km`, `apogee_km`, `mean_alt_km`, `eccentricity`, "
                "`inclination_deg`, `regime`) are satcat last-on-file values and leak the answer for fallen objects.")
 
     st.subheader("Sampling")
-    both = panel.groupby("norad_cat_id", observed=True)["split"].nunique()
     st.markdown(f"""
-- **Time coverage:** observations run {panel['obs_date'].min():%Y-%m-%d} to {panel['obs_date'].max():%Y-%m-%d} (train + valid); the test split covers the most recent period and is not shown.
-- **Split by date, not by object:** {int((both > 1).sum()):,} of {len(both):,} objects appear in both train and valid, so the same object can appear on both sides of the split.
-- **Low orbits only:** the panel keeps objects with perigee at or below 1,000 km, so it covers {panel['norad_cat_id'].nunique():,} of {len(objs):,} catalogued objects.
-- **Only tracked objects:** the catalogue omits objects too small to track, and tracking has improved over time, so recent years look more crowded.
-- **Censoring:** {1 - panel['event_observed'].mean():.0%} of rows are objects that had not fallen by the cutoff.
+- **Loaded sample:** {len(raw):,} observations from {raw['norad_cat_id'].nunique():,} objects, {raw.shape[1]} original columns.
+- **Selection:** the notebook sampled whole training objects within reentry-target-rate bands, with seed 20261019 and a target of 10,000 rows. The saved sample has 10,028 rows from 921 objects.
+- **Scope:** only objects with observed reentry were eligible. The sample cannot estimate reentry risk for the full population.
+- **Time coverage:** {panel['obs_date'].min():%Y-%m-%d} to {panel['obs_date'].max():%Y-%m-%d}.
+- **Source:** Supabase; display preparation does not modify stored rows or add database columns.
+- **Final test reservation:** {n_test_reserved:,} observations, matching `src/Models/classification_model.ipynb`. Exact reserved observation keys are checked even if an uploaded row is mislabeled. Objects may have earlier training observations; reservation is by row, as in the notebook.
 """)
