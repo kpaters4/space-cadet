@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+/* Space Cadet colors (from the game). Use as bg-space, text-amber, etc. */
+@theme {
+  --color-space: #070b14;
+  --color-amber: #f2a93b;
+}
+
+body {
+  background: #070b14;
+  color: #dbe7f5;
+  font-family: system-ui, sans-serif;
+}
+
+h1,
+h2,
+h3 {
+  color: #f2a93b;
+}
+
+html {
+  scroll-behavior: smooth;
+}
