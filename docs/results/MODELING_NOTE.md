@@ -1,16 +1,19 @@
 # Phase 4 (D3) Modeling Note
 
 **Status: real data, limited sample, pre-revision panel design.** Every number below
-comes from `data/raw/satcat.csv`, `decay.csv`, and a 2,000-object random sample of
+comes from `data/raw/satcat.csv`, `decay.csv`, and a 10,000-object random sample of
 the real 47 GB `gp_history.csv` (see Data & Method). It is not synthetic. It is also
 not the final panel: `build_panel()` still uses the pre-revision sampling design
 (PLAN Decisions 3–6 — calendar snapshots, perigee-at-date filter, junk-types-only,
 object-disjoint splits — are not yet implemented), and the gp_history sample covers
-3.3% of eligible objects, not all of them. Read this as "does the evaluation
+16.3% of eligible objects, not all of them. Read this as "does the evaluation
 pipeline work, and what does it say on real data so far," not as the group's final
 D3 numbers. Full tables, every metric, and raw CSVs are in this directory
 (`RESULTS.md`, `results_valid.csv`, `error_by_group.csv`, `run_metadata.json`);
 this note is the prose argument built on top of them.
+
+*(This supersedes an earlier 2,000-object run. The headline conclusions mostly
+held up at 5x the sample, with two real changes noted in §2 and §4.)*
 
 ## 1. Data & method
 
@@ -18,20 +21,22 @@ this note is the prose argument built on top of them.
 joined with CelesTrak `SW-All.csv` (daily space weather, 1957–present) and a sample
 of Space-Track `gp_history` (orbital element sets). `gp_history.csv` is 47 GB —
 too large to read whole on a laptop — so `load_gp_history()` reads it in chunks,
-keeping only rows for 2,000 objects drawn at random (seed 20261019) from the 61,474
-objects eligible for the panel (perigee ≤ 1,000 km, launched on or after
-1957-10-01). Of those 2,000, only 859 (43%) had any element-set history at all in
-the file — Space-Track's bulk `gp_history` export does not cover every cataloged
-object evenly. That gap is the main data-quality constraint on this run: **75% of
-panel rows have no `orbit_asof` features** (no matched element set), so
+keeping only rows for 10,000 objects drawn at random (seed 20261019) from the
+61,474 objects eligible for the panel (perigee ≤ 1,000 km, launched on or after
+1957-10-01). Of those 10,000, only 4,275 (42.8%) had any element-set history at all
+in the file — the same ~43% coverage rate as the earlier 2,000-object run, which
+confirms it's a property of Space-Track's bulk export, not sampling bad luck. That
+gap is still the main data-quality constraint on this run: **75% of panel rows have
+no `orbit_asof` features** (no matched element set), so
 `perigee_decay_rate_km_per_day`, `bstar`, `mean_motion`, and the physics baseline
 are only informative for about a quarter of the data.
 
-**Panel.** 23,031 rows, 1,983 objects, split by `obs_date` quantile — train (70%,
-16,127 rows / 1,598 objects), valid (15%, 3,452 rows / 789 objects), test (15%,
-reserved, never read by this script or by me while writing this note). 51.6% of
-cataloged objects have decayed; in the panel, 12,768 rows are labelled events and
-10,263 are right-censored.
+**Panel.** 114,993 rows, 9,909 objects (up from 23,031 rows / 1,983 objects at
+2,000 sampled objects), split by `obs_date` quantile — train (70%, 80,498 rows /
+7,938 objects), valid (15%, 17,257 rows / 3,937 objects), test (15%, 17,238 rows /
+3,344 objects, reserved and never read by this script or by me while writing this
+note). 51.6% of cataloged objects have decayed; in the panel, 63,309 rows are
+labelled events and 51,684 are right-censored.
 
 **Targets.** Two, because the team's primary-target decision (PLAN Decision 1) is
 still open:
@@ -52,7 +57,7 @@ seed 20261019, 1,000 object-level bootstrap replicates for every interval:
 - **Ablation**: every model on `baseline_no_sun` (20 features: orbit + object) vs.
   `with_sun_trailing` (52 features: + 32 trailing space-weather columns).
 
-**Metrics.** Classification: PR-AUC (headline — positives are rare, 21.5% of
+**Metrics.** Classification: PR-AUC (headline — positives are rare, 21.8% of
 valid), Brier score, recall at a 10% false-alarm rate (threshold fit on train,
 applied to valid), ROC-AUC. Regression: MAE/RMSE in log1p days, MAE and median
 absolute error in raw days. All intervals resample **objects**, not rows — one
@@ -61,129 +66,136 @@ every interval look far tighter than it is.
 
 ## 2. Comparison results
 
-**Classification** (`reenters_within_horizon`, valid: 3,165 rows / 748 objects,
-21.5% positive):
+**Classification** (`reenters_within_horizon`, valid: 15,460 rows / 3,721 objects,
+21.8% positive):
 
 | model | feature set | PR-AUC | Brier | recall@10%FAR | ROC-AUC |
 |---|---|---|---|---|---|
-| base_rate | — | 0.215 [0.175, 0.254] | 0.183 | 1.00 (far_realised=1.00) | 0.500 |
-| physics_decay | — | 0.271 [0.221, 0.319] | 0.175 | 0.862 (far_realised=0.80) | 0.564 |
-| logistic | no_sun | 0.508 [0.404, 0.602] | 0.143 | 0.166 | 0.753 |
-| **hist_gb** | **with_sun** | **0.566 [0.476, 0.640]** | 0.146 | 0.682 | **0.787** |
-| hist_gb | no_sun | 0.541 [0.455, 0.614] | 0.154 | 0.474 | 0.778 |
+| base_rate | — | 0.218 [0.201, 0.237] | 0.180 | 1.00 (far_realised=1.00) | 0.500 |
+| physics_decay | — | 0.264 [0.246, 0.283] | 0.174 | 0.875 (far_realised=0.82) | 0.554 |
+| **hist_gb** | **no_sun** | **0.568 [0.529, 0.606]** | 0.138 | 0.627 | **0.784** |
+| hist_gb | with_sun | 0.545 [0.506, 0.581] | 0.143 | 0.626 | 0.770 |
+| logistic | no_sun | 0.477 [0.434, 0.519] | 0.150 | 0.133 | 0.726 |
+| logistic | with_sun | 0.430 [0.391, 0.472] | 0.154 | 0.113 | 0.689 |
 
-**Regression** (`log1p_days_remaining`, observed reentries only, valid: 915 rows /
-160 objects):
+**Regression** (`log1p_days_remaining`, observed reentries only, valid: 4,341 rows
+/ 765 objects):
 
 | model | feature set | MAE (log1p d) | median AE (days) |
 |---|---|---|---|
-| base_rate | — | 1.413 [1.239, 1.589] | 352 |
-| physics_decay | — | 1.652 [1.488, 1.822] | 396 |
-| **ridge** | **no_sun** | **1.221 [1.088, 1.360]** | **194** |
-| hist_gb | no_sun | 1.320 [1.173, 1.455] | 313 |
+| base_rate | — | 1.573 [1.491, 1.658] | 428 |
+| physics_decay | — | 1.858 [1.778, 1.938] | 474 |
+| **hist_gb** | **no_sun** | **1.196 [1.155, 1.235]** | **226** |
+| ridge | no_sun | 1.308 [1.240, 1.379] | 223 |
 
-Both candidates beat both baselines on both tasks, and the gap is large relative
-to the bootstrap intervals: `hist_gb`'s PR-AUC interval `[0.476, 0.640]` does not
-overlap `physics_decay`'s `[0.221, 0.319]`, and `ridge`'s log1p-MAE interval
-`[1.088, 1.360]` barely touches `base_rate`'s `[1.239, 1.589]`. The two baselines
-are legitimately weak here, and not just because the task is hard: `physics_decay`
-had no usable descent rate for **77–80% of valid rows** (no matched element set
-inside the trailing window) and fell back to the training prior for those, which
-is most of the sample. On the quarter of rows where it had real orbit history, it
-still only reaches PR-AUC 0.271 — a useful sanity check that `physics_decay` is a
-real, weak-but-better-than-chance baseline, not a hard floor the candidates lose to.
+Both candidates still beat both baselines on both tasks, by a wide margin:
+`hist_gb`'s PR-AUC interval `[0.529, 0.606]` doesn't come close to overlapping
+`physics_decay`'s `[0.246, 0.283]`, and its log1p-MAE interval `[1.155, 1.235]`
+sits entirely below `base_rate`'s `[1.491, 1.658]`. `physics_decay`'s fallback rate
+(no usable descent rate) is now measured more precisely at 5x the sample —
+**82.0%** for classification, **80.1%** for regression, both close to the 2,000-
+object run's 80/77%, confirming that gap is a real coverage limit, not noise.
 
-**Does space weather help?** Not detectably at this sample size. `hist_gb`'s
-PR-AUC moves from 0.541 (no sun) to 0.566 (with sun), `logistic`'s moves the other
-way, from 0.508 to 0.479; both regression candidates get slightly *worse* with sun
-features (ridge: 1.221 → 1.336; hist_gb: 1.320 → 1.353). Every one of these deltas
-is small compared to the ~0.15–0.2-wide 95% intervals on PR-AUC and log1p-MAE
-above. The honest read is: this run neither confirms nor rules out a space-weather
-effect — it needs more objects (the valid bootstrap is over 748 objects, which is
-not many) and, as section 4 notes, the valid split happens to sit in a single
-solar-activity tercile, which removes most of the natural variation the ablation
-is supposed to measure.
+**What changed vs. the 2,000-object run.** The selected model used to split —
+`hist_gb`+sun for classification, `ridge` (no sun) for regression. At 10,000
+objects, **`hist_gb` without sun features now wins both tasks outright** (PR-AUC
+0.568 vs. 0.541 before; log1p-MAE 1.196, clearly ahead of `ridge`'s 1.308). More
+data resolved the earlier split pick into a single, simpler answer: see §3.
+
+**Does space weather help?** More clearly **no**, not **"not yet clear,"** now
+that there's 5x the data. Every candidate on both tasks got *worse* with the 32
+trailing space-weather columns added — `hist_gb` classification PR-AUC 0.568 →
+0.545, `logistic` 0.477 → 0.430, `ridge` regression MAE 1.308 → 1.536, `hist_gb`
+regression MAE 1.196 → 1.364. At 2,000 objects this was mixed (one model up,
+one down); at 10,000 it's unanimous in the same direction. That's a more
+confident *negative* finding than before, but see §4 before reading it as "the
+Sun doesn't matter physically" — the valid split still has no solar-activity
+contrast to learn from, which is a different claim than "we measured no effect
+across solar conditions."
 
 ## 3. Selected model
 
-**`hist_gb` on `with_sun_trailing`**, for classification; **`ridge` on
-`baseline_no_sun`**, for regression — provisionally, pending Decision 1.
+**`hist_gb` on `baseline_no_sun`**, for both classification and regression —
+provisionally, pending Decision 1.
 
-`hist_gb` is the only model that handles missing data the way this panel actually
-needs it handled: three-quarters of rows have no `orbit_asof` features at all, and
-HistGradientBoosting treats "missing" as a learnable split rather than requiring
-an imputed stand-in. It has the best PR-AUC and ROC-AUC of any model on either
-feature set, and — because it can use the sun features without them needing to be
-median-imputed over 75% of rows — it's the one candidate where adding the sun
-features didn't hurt. For regression, `ridge` wins on every metric; `hist_gb`
-regression is competitive but not better, so there's no reason to prefer the more
-complex model there. Neither choice is final: it should be re-run once the real
-coverage problem (section 4) is fixed, since right now "handles 75%-missing
-features gracefully" is doing a lot of the work in `hist_gb`'s favor, for a reason
-specific to this sample rather than to the physics.
+This is a cleaner pick than the 2,000-object run produced, and for a specific
+reason: `HistGradientBoosting` treats a missing `orbit_asof` value as a learnable
+split rather than requiring an imputed stand-in, which matters directly here since
+75% of rows have no gp_history match at all. The earlier run picked `ridge` for
+regression only because `hist_gb` hadn't yet had enough data to out-perform it;
+with 5x the valid objects, `hist_gb` wins outright on every metric for both tasks,
+and the sun features no longer help on any of them, so the simplest version of
+the model — no sun, `hist_gb` — is now the one to build on. Still not final:
+"handles 75%-missing features gracefully" is still doing real work in `hist_gb`'s
+favor *for this sample specifically*, and the pick should be re-checked once
+gp_history coverage improves (not just the object count — the 43% coverage rate
+itself needs to go up).
 
 ## 4. Error analysis by group
 
 Full breakdown, every model × feature set × group, with `n_rows` and `n_objects`
 for all of them, is in `error_by_group.csv`; groups under 30 rows get counts but no
-metrics (PR-AUC on a handful of rows is noise). Two groupings turned out to be
-uninformative in this particular run, for reasons worth stating plainly:
+metrics (PR-AUC on a handful of rows is noise). Two groupings are still
+uninformative in this run, and at 5x the sample this is now a structural finding,
+not a small-sample artifact:
 
-- **Solar-activity tercile**: every single valid row — all 3,165 of them — falls
-  in the `3_high` tercile (cut points fit on train: ≤82.3, ≤131.2, >131.2 sfu).
-  The valid split is a contiguous slice of recent calendar time, and solar
-  activity has been high and rising through that slice, so the time-ordered split
-  has accidentally produced a valid set with no low- or mid-activity rows at all.
-  This specific ablation table cannot be read as "errors are flat across solar
-  conditions" — there's only one condition to look at.
-- **Perigee band**: 69% of classification-valid rows and 73% of regression-valid
-  rows land in `missing` (no `perigee_km_asof`), the direct downstream effect of
-  the 75% `orbit_asof` coverage gap in section 1. The bands that do have rows
-  (`[500,600)` km is the largest, with 521 rows) don't show an obvious trend, but
-  there isn't enough non-missing data in most of them to say much.
-- **Object type**: `PAYLOAD` is 72% of classification-valid rows (2,284/3,165), not
-  `DEBRIS` or `ROCKET BODY`. PLAN Decision 5 explicitly calls for junk-types-only
-  (`DEBRIS`, `ROCKET BODY`, `TBA`, `UNKNOWN`) precisely because an active
-  satellite's reentry is an operator decision, not physics — and that filter is
-  one of the Decision 3–6 revisions this panel predates. This run is, in part,
-  learning when satellite operators choose to deorbit, which is a different and
-  easier problem than predicting debris physics. This is the single most
-  important caveat on the whole result, more than the sample size: raise it before
-  anyone quotes the PR-AUC numbers above as "the model predicts reentry physics."
-- **RCS size**: `LARGE` dominates (2,144/3,165 rows) — consistent with the
+- **Solar-activity tercile**: every single valid row — all 15,460 of them — still
+  falls in the `3_high` tercile (train cut points: ≤81.8, ≤131.0, >131.0 sfu),
+  identical to the 2,000-object run. **This rules out "not enough objects" as the
+  explanation.** The valid split is a contiguous slice of recent calendar time,
+  and solar activity has been high and rising through that slice regardless of
+  how many objects are drawn from it — the fix has to be a different split design
+  (PLAN Decisions 3–6, or an explicitly solar-stratified split), not more data.
+  Read §2's "space weather doesn't help" finding in that light: it's a confident
+  statement about *this split*, not yet a confident statement about solar effects
+  in general.
+- **Perigee band**: 70.7% of classification-valid rows and 75.6% of regression-
+  valid rows land in `missing` (no `perigee_km_asof`) — down slightly from 69%/73%
+  at 2,000 objects, in the direction you'd want but not a fix. A new sparse
+  `[1000, inf)` band appears at this scale (12 rows / 9 objects) — too few to
+  read anything into, included for completeness.
+- **Object type**: `PAYLOAD` is 72.7% of classification-valid rows (11,240/15,460)
+  — *higher*, not lower, than the 72% at 2,000 objects. PLAN Decision 5 calls for
+  junk-types-only (`DEBRIS`, `ROCKET BODY`, `TBA`, `UNKNOWN`) precisely because an
+  active satellite's reentry is an operator decision, not physics — and that
+  filter is one of the Decision 3–6 revisions this panel predates. **This run
+  confirms the skew is structural, not a small-sample fluke**: it's still the
+  single most important caveat on the whole result. Raise it before anyone quotes
+  the PR-AUC numbers above as "the model predicts reentry physics."
+- **RCS size**: `LARGE` dominates (10,631/15,460 rows), consistent with the
   `PAYLOAD` skew, since cataloged payloads are disproportionately large objects.
 
 ## 5. Limitations
 
-1. **gp_history sample, not census.** 2,000 of 61,474 eligible objects (3.3%), and
-   only 859 of those actually had element-set history. Rerunning with more objects
-   (`--sample-objects`, or a proper streaming join) will change these numbers,
-   likely a lot, and should be treated as a required next step, not a nice-to-have.
+1. **gp_history sample, not census.** 10,000 of 61,474 eligible objects (16.3%),
+   and only 4,275 of those actually had element-set history — the same ~43%
+   coverage rate seen at 2,000 objects, so raising the sample further will keep
+   growing the panel but will not, by itself, fix the 75% missing-orbit-feature
+   rate. A streaming join against the *full* `gp_history.csv`, or a better
+   coverage-aware sampling strategy, is the real fix.
 2. **Pre-revision panel design.** No junk-type filter (section 4), no
    object-disjoint split guarantee, old epoch-sampling grid. PLAN Decisions 3–6
    are not yet in `build_dataset.py`.
-3. **Degenerate solar tercile in valid.** Section 4 — the sun-ablation comparison
-   in section 2 is likely underpowered for a structural reason (one solar regime
-   in the scoring split), not just sample size.
-4. **Object-level bootstrap on a small number of objects.** 748 objects for
-   classification, 160 for regression — wide intervals are honestly wide, not a
-   bug; don't read a point estimate without its bracket.
+3. **Degenerate solar tercile in valid — now confirmed structural.** Identical
+   at 2,000 and 10,000 objects (section 4). The sun-ablation's negative finding
+   in section 2 is confident about *this split*, not about solar effects in
+   general; a split with real solar-regime contrast is needed before that
+   distinction can be collapsed.
+4. **Object-level bootstrap**: 3,721 objects for classification, 765 for
+   regression at this scale (up from 748 / 160) — intervals are tighter than the
+   2,000-object run but still wide enough that the bracket, not just the point
+   estimate, should be read.
 5. **Conditional days-left label.** `log1p_days_remaining` is defined only for
    objects that have actually decayed; this is Decision 1's core concern and is
    why both targets are reported rather than one.
-6. **Three rows (test split) have obs_date past the space-weather file's last
-   observed day**, landing in CelesTrak's forecast tail instead of real
-   observations. All three are in `test`, which Phase 4 never reads, so this run
-   is unaffected — but it should be fixed in `attach_space_weather` before test is
-   ever unlocked.
-7. **physics_decay's fallback rate (77–80%)** inflates how weak it looks; its
-   performance on the ~20–23% of rows where it had a real descent rate (not
+6. **physics_decay's fallback rate (80–82%)** inflates how weak it looks; its
+   performance on the ~18–20% of rows where it had a real descent rate (not
    reported separately above) is the fairer comparison and would need isolating
    before using this baseline to argue the candidates are a big improvement.
 
 ## 6. Runnable evaluation code
 
 `src/models/evaluate.py` — `uv run python src/models/evaluate.py` (after
-`src/build_dataset.py`; see `docs/results/README.md` for the sampling flags and
-exact commands used to produce the numbers above:
-`--sample-objects 2000`, `--bootstrap 1000`, `--banner "..."`).
+`src/build_dataset.py --sample-objects 10000`; see `docs/results/README.md` for
+the sampling flags and exact commands used to produce the numbers above:
+`--sample-objects 10000`, `--bootstrap 1000`, `--banner "..."`).

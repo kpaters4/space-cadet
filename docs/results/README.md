@@ -21,37 +21,44 @@ Output files:
 | `error_by_group.csv` | one row per task × model × feature set × subgroup, always with `n_rows` and `n_objects` |
 | `run_metadata.json` | seed, panel sha256, library versions, split counts, solar tercile cut points, warnings |
 
-## Status — 2026-11-14
+## Status — 2026-11-15
 
 Before running on real data, `evaluate.py` was smoke-tested end-to-end on
 synthetic data from `src/make_sample_data.py` (not committed here — invented
 numbers, not a D3 deliverable) to confirm the pipeline, metrics, and guards
 work before trusting it with a scarce real sample.
 
-**`real_run_2000obj/` is real Space-Track + CelesTrak data**, but a **limited,
+**`real_run_10000obj/` is real Space-Track + CelesTrak data**, but a **limited,
 pre-revision** run — read `MODELING_NOTE.md` in this directory for the full
-writeup (comparison table, selected model, error analysis, limitations). Two
-things still block a final run:
+writeup (comparison table, selected model, error analysis, limitations). This
+supersedes an earlier 2,000-object run (same code, bigger sample;
+`config.GP_MAX_OBJECTS` now defaults to 10,000). Two things still block a final
+run:
 
 1. ~~`data/raw/SW-All.csv` was missing~~ — downloaded from CelesTrak, done.
 2. ~~`load_gp_history()` read the 47 GB file in one `pd.read_csv`~~ — fixed:
    it now streams the file in chunks with `usecols` trimmed to just the columns
    `normalize()` keeps, and reads it only for a random sample of eligible
-   objects (`config.GP_MAX_OBJECTS`, default 2,000; `--sample-objects N` /
-   `--no-sample-objects` on `build_dataset.py` to override). `real_run_2000obj/`
-   used a 2,000-object sample — 3.3% of the 61,474 eligible objects, of which
-   only 859 actually had any element-set history in the file. That coverage gap
-   (not the code) is now the binding constraint; see the modeling note.
+   objects (`config.GP_MAX_OBJECTS`, default 10,000; `--sample-objects N` /
+   `--no-sample-objects` on `build_dataset.py` to override). `real_run_10000obj/`
+   used a 10,000-object sample — 16.3% of the 61,474 eligible objects, of which
+   only 4,275 (42.8%) actually had any element-set history in the file — the
+   same ~43% coverage rate as the 2,000-object run, which confirms it's a
+   property of the bulk export, not sampling bad luck. That coverage gap (not
+   the object count) is the binding constraint now; see the modeling note.
 3. **Still open.** The panel builder still implements the *pre-revision* design:
    percentile cuts on `obs_date` for splits, `EPOCHS_PER_OBJECT` epochs on a
    jittered grid, no junk-type filter. PLAN Decisions 3–6 replace all of that
    (calendar snapshots, perigee-at-date filter, junk types only, object-disjoint
-   splits). `real_run_2000obj/` found this directly: 72% of its valid rows are
-   `PAYLOAD`, not debris, because the junk-type filter isn't in yet.
+   splits). `real_run_10000obj/` confirms this isn't a small-sample artifact:
+   72.7% of its valid rows are `PAYLOAD`, not debris (up slightly from 72% at
+   2,000 objects), because the junk-type filter isn't in yet. The solar-activity
+   tercile breakdown is identically degenerate (100% `3_high`) at both sample
+   sizes too — that one needs a split-design fix, not more objects.
 
-So the honest order is: raise `--sample-objects` and/or finish Decisions 3–6,
-rebuild the panel, then rerun the command above — the evaluation script itself
-does not need to change either way.
+So the honest order now is: finish Decisions 3–6 (more objects alone won't fix
+#3), rebuild the panel, then rerun the command above — the evaluation script
+itself does not need to change either way.
 
 ## What the script reports, and why
 
