@@ -1,0 +1,93 @@
+{
+  "generated_at": "2026-11-15T03:37:40+00:00",
+  "panel_path": "data/processed/panel.csv",
+  "panel_sha256": "6d65fefb137dd7dae88af383c692d2afb3776bae861ee58f7e5d139b43780ab9",
+  "feature_groups_path": "data/processed/feature_groups.json",
+  "seed": 20261019,
+  "bootstrap": 1000,
+  "horizon_days": 365.0,
+  "fixed_far": 0.1,
+  "min_group_rows": 30,
+  "reentry_perigee_km": 120.0,
+  "with_mlp": false,
+  "split_counts": {
+    "train_rows": 16127,
+    "valid_rows": 3452,
+    "train_objects": 1598,
+    "valid_objects": 789,
+    "test_rows_skipped_unread": 3452,
+    "test_objects_skipped_unread": 669
+  },
+  "task_notes": [
+    {
+      "task": "classification",
+      "rows_used": 19292,
+      "rows_without_label": 287
+    },
+    {
+      "task": "classification",
+      "feature_set": "baseline_no_sun",
+      "n_features": 20,
+      "n_numeric": 16,
+      "n_categorical": 4,
+      "missing_declared": [],
+      "solar_tercile_cuts_sfu": [
+        82.3,
+        131.2
+      ],
+      "solar_tercile_source": "train terciles of f107_adj_mean_81d"
+    },
+    {
+      "task": "classification",
+      "feature_set": "with_sun_trailing",
+      "n_features": 52,
+      "n_numeric": 48,
+      "n_categorical": 4,
+      "missing_declared": [],
+      "solar_tercile_cuts_sfu": [
+        82.3,
+        131.2
+      ],
+      "solar_tercile_source": "train terciles of f107_adj_mean_81d"
+    },
+    {
+      "task": "regression",
+      "rows_used": 12680,
+      "rows_without_label": 6899
+    },
+    {
+      "task": "regression",
+      "feature_set": "baseline_no_sun",
+      "n_features": 20,
+      "n_numeric": 16,
+      "n_categorical": 4,
+      "missing_declared": [],
+      "solar_tercile_cuts_sfu": [
+        82.6,
+        131.5
+      ],
+      "solar_tercile_source": "train terciles of f107_adj_mean_81d"
+    },
+    {
+      "task": "regression",
+      "feature_set": "with_sun_trailing",
+      "n_features": 52,
+      "n_numeric": 48,
+      "n_categorical": 4,
+      "missing_declared": [],
+      "solar_tercile_cuts_sfu": [
+        82.6,
+        131.5
+      ],
+      "solar_tercile_source": "train terciles of f107_adj_mean_81d"
+    }
+  ],
+  "warnings": [],
+  "provenance_banner": "REAL Space-Track + CelesTrak data, but a LIMITED random sample of 2,000/61,474 eligible objects (gp_history.csv is 47GB; see data/processed run log). Panel also predates PLAN Decisions 3-6 (old epoch-sampling design). Treat as a real but partial/pre-revision result.",
+  "versions": {
+    "python": "3.13.5",
+    "scikit-learn": "1.9.1",
+    "pandas": "3.0.6",
+    "numpy": "2.5.4"
+  }
+}

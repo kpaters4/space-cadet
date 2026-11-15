@@ -56,7 +56,9 @@ import space_weather
 from config import (
     DECAY,
     EPOCHS_PER_OBJECT,
+    GP_CHUNKSIZE,
     GP_HISTORY,
+    GP_MAX_OBJECTS,
     MAX_ELEMENT_AGE_DAYS,
     MAX_PERIGEE_KM,
     MIN_EPOCH,
@@ -158,20 +160,99 @@ def load_decay(path=DECAY) -> pd.DataFrame:
     return out[[c for c in wanted if c in out.columns]].reset_index()
 
 
-def load_gp_history(path=GP_HISTORY) -> pd.DataFrame:
+def sample_eligible_object_ids(
+    objects: pd.DataFrame, max_objects: int | None, rng
+) -> tuple[set[int], dict]:
+    """Which objects gp_history actually needs to cover, for this run.
+
+    Uses the same eligibility test build_panel() applies before sampling
+    epochs (perigee <= MAX_PERIGEE_KM, launched on or after MIN_EPOCH), so the
+    objects gp_history is read for are exactly the ones that can appear in the
+    panel. `max_objects=None` keeps every eligible object -- only safe if
+    gp_history.csv fits in memory whole.
+    """
+    eligible = objects.loc[
+        objects["perigee_km"].le(MAX_PERIGEE_KM) & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH)),
+        "norad_cat_id",
+    ].dropna().astype("int64")
+    info = {"eligible_objects": int(eligible.nunique())}
+
+    if max_objects is None or eligible.nunique() <= max_objects:
+        info["gp_object_sample_size"] = int(eligible.nunique())
+        info["gp_object_sampling"] = "all eligible objects (GP_MAX_OBJECTS not applied)"
+        return set(eligible.tolist()), info
+
+    ids = eligible.unique()
+    chosen = rng.choice(ids, size=max_objects, replace=False)
+    info["gp_object_sample_size"] = int(max_objects)
+    info["gp_object_sampling"] = (
+        f"random sample of {max_objects:,} of {eligible.nunique():,} eligible objects "
+        f"(seed {RANDOM_SEED}) -- gp_history.csv is too large to read in full"
+    )
+    return set(int(i) for i in chosen), info
+
+
+def load_gp_history(
+    path=GP_HISTORY, object_ids: set[int] | None = None, chunksize: int = GP_CHUNKSIZE
+) -> pd.DataFrame:
     """Orbital element history (TLE-equivalent), one row per element set.
 
     Required, same as satcat and decay (main() checks the file exists before
     calling this). This is what lets orbit features be taken *as of* each
     observation epoch instead of satcat's one leaky terminal snapshot.
+
+    Read in chunks, with two things trimmed before a single full row is held
+    in memory:
+      - `usecols`, resolved against the real header so only the columns
+        normalize() would keep survive the read -- the TLE lines and export
+        metadata are most of the file's bytes and none of its features.
+      - `object_ids`, when given: rows for any other object are dropped per
+        chunk rather than concatenated and filtered afterward. This is what
+        makes a 40+ GB export tractable on a laptop; see
+        `sample_eligible_object_ids` for how the id set is chosen.
+    A `norad_cat_id` lookup column is added to the header probe itself, so the
+    per-chunk filter works even before normalize() renames anything.
     """
     path = Path(path)
-    raw = pd.read_csv(path, low_memory=False)
-    df, missing = normalize(
-        raw, GP_HISTORY_ALIASES, required=("norad_cat_id", "epoch", "apogee_km", "perigee_km")
+    header = pd.read_csv(path, nrows=0).columns
+    lookup = {c.strip().upper(): c for c in header}
+    id_col = next(
+        (lookup[cand] for cand in GP_HISTORY_ALIASES["norad_cat_id"] if cand in lookup), None
     )
-    if missing:
-        sys.exit(f"{path.name} is missing required column(s): {missing}\ncolumns seen: {list(raw.columns)}")
+    if id_col is None:
+        sys.exit(f"{path.name} has no recognisable NORAD id column; columns seen: {list(header)}")
+
+    wanted_raw = {id_col}
+    for candidates in GP_HISTORY_ALIASES.values():
+        for cand in candidates:
+            if cand in lookup:
+                wanted_raw.add(lookup[cand])
+                break
+    usecols = [c for c in header if c in wanted_raw]
+
+    kept, seen_ids, rows_read = [], set(), 0
+    for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize, low_memory=False):
+        rows_read += len(chunk)
+        if object_ids is not None:
+            ids = pd.to_numeric(chunk[id_col], errors="coerce")
+            chunk = chunk.loc[ids.isin(object_ids)]
+        if chunk.empty:
+            del chunk
+            continue
+        df, missing = normalize(
+            chunk, GP_HISTORY_ALIASES, required=("norad_cat_id", "epoch", "apogee_km", "perigee_km")
+        )
+        if missing:
+            sys.exit(f"{path.name} is missing required column(s): {missing}\ncolumns seen: {list(header)}")
+        seen_ids.update(pd.to_numeric(df["norad_cat_id"], errors="coerce").dropna().astype("int64").tolist())
+        kept.append(df)
+        del chunk, df
+
+    df = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame(columns=list(GP_HISTORY_ALIASES))
+    print(
+        f"  load_gp_history: read {rows_read:,} raw rows, kept {len(df):,} "
+        f"({len(seen_ids):,} distinct objects){'' if object_ids is None else f', filtered to a {len(object_ids):,}-object sample'}"
+    )
 
     df["norad_cat_id"] = pd.to_numeric(df["norad_cat_id"], errors="coerce").astype("Int64")
     df["epoch"] = pd.to_datetime(df["epoch"], errors="coerce", utc=True).dt.tz_localize(None)
@@ -399,7 +480,11 @@ def attach_orbit_history(
 
 
 def build_panel(
-    objects: pd.DataFrame, sw: pd.DataFrame, asof: pd.Timestamp, gp: pd.DataFrame
+    objects: pd.DataFrame,
+    sw: pd.DataFrame,
+    asof: pd.Timestamp,
+    gp: pd.DataFrame,
+    object_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(RANDOM_SEED)
 
@@ -407,6 +492,11 @@ def build_panel(
         objects["perigee_km"].le(MAX_PERIGEE_KM)
         & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
     ]
+    if object_ids is not None:
+        # Keep the panel to the same objects gp_history was read for -- the
+        # rest of `eligible` would otherwise sit in the panel with no
+        # orbit_asof coverage at all, diluting the real sample with holes.
+        eligible = eligible[eligible["norad_cat_id"].astype("int64").isin(object_ids)]
     epochs = sample_epochs(eligible, asof, EPOCHS_PER_OBJECT, rng)
 
     object_cols = [
@@ -550,9 +640,14 @@ def feature_groups(panel: pd.DataFrame) -> dict:
     }
 
 
-def report(objects: pd.DataFrame, panel: pd.DataFrame, asof: pd.Timestamp) -> None:
+def report(
+    objects: pd.DataFrame, panel: pd.DataFrame, asof: pd.Timestamp, sample_info: dict | None = None
+) -> None:
     dec = objects["is_decayed"]
     print(f"\nas-of date: {asof.date()}")
+    if sample_info is not None and "all eligible" not in sample_info["gp_object_sampling"]:
+        print(f"\n*** gp_history subsample: {sample_info['gp_object_sampling']} ***")
+        print("*** panel.csv is a REAL but LIMITED sample -- not every eligible object ***")
     print(f"\nobjects.csv   {len(objects):>9,} rows x {objects.shape[1]:>3} cols")
     print(f"  decayed                 {dec.sum():>9,}  ({dec.mean():.1%})")
     print(f"  still in orbit          {(~dec).sum():>9,}")
@@ -625,7 +720,26 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="gp_history.csv (default: <raw-dir>/gp_history.csv)",
     )
+    ap.add_argument(
+        "--sample-objects",
+        type=int,
+        default=GP_MAX_OBJECTS,
+        help=(
+            "read gp_history.csv for at most this many randomly sampled eligible "
+            f"objects, not all of them (default: config.GP_MAX_OBJECTS = {GP_MAX_OBJECTS}). "
+            "Needed because the real export can be tens of GB."
+        ),
+    )
+    ap.add_argument(
+        "--no-sample-objects",
+        action="store_true",
+        help="read gp_history.csv for every eligible object (needs it to fit in memory)",
+    )
+    ap.add_argument(
+        "--gp-chunksize", type=int, default=GP_CHUNKSIZE, help="rows per gp_history.csv read chunk"
+    )
     args = ap.parse_args(argv)
+    sample_objects = None if args.no_sample_objects else args.sample_objects
 
     satcat_path = (args.raw_dir / "satcat.csv") if args.raw_dir else SATCAT
     decay_path = (args.raw_dir / "decay.csv") if args.raw_dir else DECAY
@@ -649,7 +763,6 @@ def main(argv: list[str] | None = None) -> None:
     sw_daily, _ = space_weather.build(args.sw_all)
     satcat = load_satcat(satcat_path)
     decay = load_decay(decay_path)
-    gp = load_gp_history(gp_path)
 
     # Anchor censoring on the last OBSERVED space weather day, not on "today" and
     # not on the end of the file -- the file's tail is forecast, and following a
@@ -658,7 +771,19 @@ def main(argv: list[str] | None = None) -> None:
     asof = pd.Timestamp(sw_daily.loc[sw_daily["source"].isin(["OBS", "INT"]), "date"].max()).normalize()
 
     objects = build_objects(satcat, decay, asof)
-    panel = build_panel(objects, sw_daily, asof, gp)
+
+    # Decide WHICH objects gp_history needs to cover before touching the file --
+    # that's what makes a 40+ GB export tractable (see sample_eligible_object_ids
+    # and the --sample-objects/--no-sample-objects flags above).
+    sample_rng = np.random.default_rng(RANDOM_SEED)
+    sample_ids, sample_info = sample_eligible_object_ids(objects, sample_objects, sample_rng)
+    print(
+        f"gp_history object sample: {sample_info['gp_object_sampling']} "
+        f"({sample_info['eligible_objects']:,} eligible total)"
+    )
+
+    gp = load_gp_history(gp_path, object_ids=sample_ids, chunksize=args.gp_chunksize)
+    panel = build_panel(objects, sw_daily, asof, gp, object_ids=sample_ids)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     objects.to_csv(objects_path, index=False)
@@ -667,7 +792,7 @@ def main(argv: list[str] | None = None) -> None:
         json.dumps(feature_groups(panel), indent=2), encoding="utf-8"
     )
 
-    report(objects, panel, asof)
+    report(objects, panel, asof, sample_info)
     print(f"\nwrote {objects_path}\n      {panel_path}\n      {out_dir / 'feature_groups.json'}")
 
 
