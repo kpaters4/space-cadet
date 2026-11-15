@@ -38,4 +38,12 @@ PERIGEE_DECAY_WINDOW_DAYS = 30
 # leaves the *_asof columns null rather than use it.
 MAX_ELEMENT_AGE_DAYS = 45
 
+# gp_history.csv is a full orbital-element history export and can be tens of GB
+# -- too big to read in one pd.read_csv on a laptop. When set, build_dataset.py
+# samples this many eligible objects (same perigee/launch-date filter as the
+# panel) with RANDOM_SEED, and gp_history is read in chunks keeping only their
+# rows. None reads every object's history (needs a machine that can hold it).
+GP_MAX_OBJECTS: int | None = 10000
+GP_CHUNKSIZE = 500_000
+
 RANDOM_SEED = 20261019
