@@ -56,10 +56,11 @@ import space_weather
 from config import (
     DECAY,
     DECAY_ACTUAL_MSG_TYPES,
-    EPOCHS_PER_OBJECT,
     GP_HISTORY,
+    HORIZON_DAYS,
+    INCLUDE_FORWARD_SW,
+    JUNK_TYPES,
     MAX_ELEMENT_AGE_DAYS,
-    MAX_PERIGEE_KM,
     MIN_EPOCH,
     OBJECTS,
     PANEL,
@@ -67,7 +68,13 @@ from config import (
     PROCESSED,
     RANDOM_SEED,
     SATCAT,
+    SNAPSHOT_MAX_PERIGEE_KM,
+    SNAPSHOT_START,
+    SPLIT_FRACTIONS,
     SW_ALL,
+    TEST_FROM_YEAR,
+    TRAIN_YEARS,
+    VALID_YEARS,
 )
 from normalize import DECAY_ALIASES, GP_HISTORY_ALIASES, SATCAT_ALIASES, normalize
 
@@ -254,8 +261,11 @@ def build_objects(satcat: pd.DataFrame, decay: pd.DataFrame, asof: pd.Timestamp)
         else pd.Series(pd.NaT, index=df.index)
     )
     df["decay_date"] = df["decay_epoch"].fillna(satcat_decay)
+    # A reentry dated after the as-of date has not happened as far as this table
+    # knows: treat the object as still in orbit.
+    df.loc[df["decay_date"] > asof, "decay_date"] = pd.NaT
     df["decay_date_provenance"] = np.select(
-        [df["decay_epoch"].notna(), satcat_decay.notna()],
+        [df["decay_date"].notna() & df["decay_epoch"].notna(), df["decay_date"].notna() & satcat_decay.notna()],
         ["decay_dataset", "satcat"],
         default="none",
     )
@@ -274,7 +284,7 @@ def build_objects(satcat: pd.DataFrame, decay: pd.DataFrame, asof: pd.Timestamp)
     df["orbit_snapshot_is_terminal"] = df["is_decayed"]
 
     object_type = df["object_type"] if "object_type" in df else pd.Series("", index=df.index)
-    df["is_debris"] = object_type.isin(["DEBRIS", "ROCKET BODY", "R/B", "TBA"]).fillna(False)
+    df["is_debris"] = object_type.isin(JUNK_TYPES).fillna(False)
 
     # A handful of catalogue rows carry a decay date before the launch date.
     bad = df["lifetime_days"].notna() & (df["lifetime_days"] < 0)
@@ -291,58 +301,67 @@ def build_objects(satcat: pd.DataFrame, decay: pd.DataFrame, asof: pd.Timestamp)
 # --------------------------------------------------------------------------- #
 # observation epochs
 # --------------------------------------------------------------------------- #
-def sample_epochs(objects: pd.DataFrame, asof: pd.Timestamp, n: int, rng) -> pd.DataFrame:
-    """Spread `n` observation epochs across each object's observed window.
+def monthly_snapshots(objects: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
+    """One row per (object, 1st-of-month snapshot) while the object is in orbit.
 
-    Decayed objects: epochs between launch and reentry, label = days to reentry.
-    Still in orbit:  epochs between launch and `asof`, right-censored.
-    Fractions are an even grid plus small jitter, so labels span short and long
-    horizons for every object rather than clustering at one age.
+    Snapshots run from SNAPSHOT_START to as-of minus HORIZON_DAYS, so every one
+    has a full horizon of follow-up and the 365-day label is defined for all of
+    them. Snapshot dates are fixed by the calendar, not by the object's reentry
+    date, so the sampling itself carries no information about the answer.
     """
-    df = objects.dropna(subset=["launch_date"]).copy()
-    end = df["decay_date"].where(df["is_decayed"], asof)
-    span_days = (end - df["launch_date"]).dt.total_seconds() / 86400
-    keep = span_days > 1
-    df, span_days = df.loc[keep], span_days.loc[keep]
-    if df.empty:
-        return pd.DataFrame(columns=["norad_cat_id", "epoch_index", "obs_date"])
-
-    base = (np.arange(n) + 0.5) / n
-    jitter = rng.uniform(-0.5 / n, 0.5 / n, size=(len(df), n))
-    fractions = np.clip(base[None, :] + jitter, 0.0, 0.999)
-
-    offset_ns = (fractions * span_days.to_numpy()[:, None] * 86400 * 1e9).astype("timedelta64[ns]")
-    epochs = df["launch_date"].to_numpy()[:, None] + offset_ns
-
-    rows = pd.DataFrame(
-        {
-            "norad_cat_id": np.repeat(df["norad_cat_id"].to_numpy(), n),
-            "epoch_index": np.tile(np.arange(n), len(df)),
-            "obs_date": pd.Series(epochs.reshape(-1)).dt.floor("D"),
-        }
+    last = asof - pd.Timedelta(days=HORIZON_DAYS)
+    months = pd.date_range(SNAPSHOT_START, last, freq="MS")
+    obj = objects.dropna(subset=["launch_date"])[["norad_cat_id", "launch_date", "decay_date"]]
+    grid = obj.merge(pd.DataFrame({"obs_date": months}), how="cross")
+    in_orbit = (grid["obs_date"] > grid["launch_date"]) & (
+        grid["decay_date"].isna() | (grid["decay_date"] > grid["obs_date"])
     )
-    return rows.drop_duplicates(["norad_cat_id", "obs_date"])
+    grid = grid[in_orbit].copy()
+    grid["epoch_index"] = (
+        (grid["obs_date"].dt.year - months[0].year) * 12 + grid["obs_date"].dt.month - months[0].month
+    )
+    return grid[["norad_cat_id", "epoch_index", "obs_date"]].reset_index(drop=True)
 
 
+def assign_object_splits(ids: pd.Series) -> pd.Series:
+    """Seeded, per-object split draw: hash of (id, seed), independent of which
+    other objects are present, so adding objects never reshuffles existing ones."""
+    h = pd.util.hash_array(ids.to_numpy().astype("uint64") + np.uint64(RANDOM_SEED))
+    u = h / np.float64(2**64)
+    edges = np.cumsum([SPLIT_FRACTIONS["train"], SPLIT_FRACTIONS["valid"]])
+    return pd.Series(np.select([u < edges[0], u < edges[1]], ["train", "valid"], "test"), index=ids.index)
+
+
+def in_split_window(split: pd.Series, obs_date: pd.Series) -> pd.Series:
+    """Chronological windows with gap years (2021, 2023) between them."""
+    y = obs_date.dt.year
+    return (
+        (split.eq("train") & y.between(*TRAIN_YEARS))
+        | (split.eq("valid") & y.between(*VALID_YEARS))
+        | (split.eq("test") & y.ge(TEST_FROM_YEAR))
+    )
+
+
+# --------------------------------------------------------------------------- #
+# space weather
+# --------------------------------------------------------------------------- #
 def attach_space_weather(panel: pd.DataFrame, sw: pd.DataFrame) -> pd.DataFrame:
-    """Join trailing features at the epoch, plus forward-looking forecast features."""
+    """Join trailing space-weather features known the day BEFORE each snapshot.
+
+    Same-day values may not be complete at prediction time, so the row for
+    obs_date - 1 is used (its trailing windows end on that day). Forward-looking
+    forecast features are not built: they would need a forecast at prediction time.
+    """
     sw = sw.copy()
     sw["date"] = pd.to_datetime(sw["date"])
-
-    # Forward windows: mean F10.7 / ap over the days AFTER the epoch. Computed by
-    # rolling over the reversed series, so window `w` at date d covers (d, d+w].
-    rev = sw.set_index("date")[["f107_adj", "ap_avg"]].iloc[::-1]
-    for w in (90, 365):
-        min_p = max(1, int(w * 0.8))
-        for src, name in (("f107_adj", f"fwd_f107_adj_mean_{w}d"), ("ap_avg", f"fwd_ap_mean_{w}d")):
-            sw[name] = (
-                rev[src].shift(1).rolling(w, min_periods=min_p).mean().iloc[::-1].to_numpy()
-            )
-
     drop = [c for c in ("source", "is_gap_filled") if c in sw.columns]
-    return panel.merge(
-        sw.drop(columns=drop), left_on="obs_date", right_on="date", how="left"
-    ).drop(columns="date")
+    sw = sw.drop(columns=drop)
+    # sw_asof_date = the day whose values the row carries; it is always < obs_date.
+    sw["sw_asof_date"] = sw["date"]
+    out = panel.assign(_sw_key=panel["obs_date"] - pd.Timedelta(days=1)).merge(
+        sw, left_on="_sw_key", right_on="date", how="left"
+    )
+    return out.drop(columns=["_sw_key", "date"])
 
 
 # Renamed so these never collide with satcat's terminal-snapshot columns of
@@ -407,13 +426,19 @@ def attach_orbit_history(
 def build_panel(
     objects: pd.DataFrame, sw: pd.DataFrame, asof: pd.Timestamp, gp: pd.DataFrame
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(RANDOM_SEED)
+    drops: list[tuple[str, int]] = []
 
     eligible = objects[
-        objects["perigee_km"].le(MAX_PERIGEE_KM)
-        & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
+        objects["object_type"].isin(JUNK_TYPES) & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
     ]
-    epochs = sample_epochs(eligible, asof, EPOCHS_PER_OBJECT, rng)
+    drops.append(("objects: not junk type / launched before MIN_EPOCH", len(objects) - len(eligible)))
+    # Objects with no element history can never pass the orbit filter below; skip
+    # them up front (matters when gp_history was pulled for a sample of objects).
+    n_el = len(eligible)
+    eligible = eligible[eligible["norad_cat_id"].isin(gp["norad_cat_id"].unique())]
+    drops.append(("objects: no gp_history rows", n_el - len(eligible)))
+    epochs = monthly_snapshots(eligible, asof)
+    drops.append(("snapshots generated (object in orbit on the 1st)", len(epochs)))
 
     object_cols = [
         c
@@ -427,30 +452,36 @@ def build_panel(
         if c in objects.columns
     ]
     panel = epochs.merge(objects[object_cols], on="norad_cat_id", how="left")
+    # merge_asof's `by` key must match gp's plain int64 exactly; no NA survives here.
+    panel["norad_cat_id"] = panel["norad_cat_id"].astype("int64")
+
+    # Split first (cheap): object-disjoint draw, then keep only rows in that split's window.
+    panel["split"] = assign_object_splits(panel["norad_cat_id"])
+    n0 = len(panel)
+    panel = panel[in_split_window(panel["split"], panel["obs_date"])].copy()
+    drops.append(("outside the object's split window (incl. gap years)", n0 - len(panel)))
+
+    panel = attach_orbit_history(panel, gp)
+    n0 = len(panel)
+    panel = panel[panel["perigee_km_asof"].notna()].copy()
+    drops.append((f"no element set within MAX_ELEMENT_AGE_DAYS of the snapshot", n0 - len(panel)))
+    n0 = len(panel)
+    panel = panel[panel["perigee_km_asof"].le(SNAPSHOT_MAX_PERIGEE_KM)].copy()
+    drops.append((f"perigee at snapshot > {SNAPSHOT_MAX_PERIGEE_KM:.0f} km", n0 - len(panel)))
 
     panel["age_days"] = (panel["obs_date"] - panel["launch_date"]).dt.total_seconds() / 86400
-    # The label.
-    panel["days_remaining"] = (panel["decay_date"] - panel["obs_date"]).dt.total_seconds() / 86400
-    # For censored rows: how long we watched after the epoch without a reentry.
-    panel["days_followed"] = np.where(
-        panel["is_decayed"],
-        panel["days_remaining"],
-        (asof - panel["obs_date"]).dt.total_seconds() / 86400,
-    )
-    panel["log1p_days_remaining"] = np.log1p(panel["days_remaining"].clip(lower=0))
+    # Labels. decay_date is only set for reentries on or before the as-of date, and
+    # every snapshot has HORIZON_DAYS of follow-up, so the primary label is defined
+    # for every row.
+    days = (panel["decay_date"] - panel["obs_date"]).dt.total_seconds() / 86400
+    panel["reenters_within_horizon"] = (days.notna() & days.le(HORIZON_DAYS)).astype(int)
+    # Secondary label: only for objects that have reentered by the as-of date, so it is
+    # CONDITIONAL on reentry -- report it next to the primary, never alone.
+    panel["days_remaining"] = days
+    panel["log1p_days_remaining"] = np.log1p(days.clip(lower=0))
 
     panel = attach_space_weather(panel, sw)
-    panel = attach_orbit_history(panel, gp)
-    panel = panel[panel["obs_date"] >= pd.Timestamp(MIN_EPOCH)].copy()
-
-    # A time-ordered split: holding out by epoch date is the only honest test of
-    # "would this have worked on junk we had not seen yet".
-    cut_train, cut_valid = panel["obs_date"].quantile([0.70, 0.85])
-    panel["split"] = np.select(
-        [panel["obs_date"] <= cut_train, panel["obs_date"] <= cut_valid],
-        ["train", "valid"],
-        default="test",
-    )
+    panel.attrs["drop_log"] = drops
     return panel.sort_values(["obs_date", "norad_cat_id"]).reset_index(drop=True)
 
 
@@ -501,7 +532,7 @@ def feature_groups(panel: pd.DataFrame) -> dict:
     ablation = {
         "baseline_no_sun": base_clean,
         "with_sun_trailing": base_clean + sw_trailing,
-        "with_sun_and_forecast": base_clean + sw_trailing + sw_forward,
+        **({"with_sun_and_forecast": base_clean + sw_trailing + sw_forward} if sw_forward else {}),
         # Kept for comparison against the leaky satcat snapshot -- the gap
         # between this and baseline_no_sun above is roughly how much that
         # snapshot was quietly helping for the wrong reason.
@@ -519,17 +550,24 @@ def feature_groups(panel: pd.DataFrame) -> dict:
         "altitude. element_age_days says how stale the matched element set "
         "was; rows past MAX_ELEMENT_AGE_DAYS have orbit_asof nulled out "
         "rather than guessed.",
-        "space_weather_forward requires a solar forecast at inference time.",
-        "Drop event_observed == 0 rows for plain regression; keep them for "
-        "survival models.",
+        "Primary target reenters_within_horizon (365 days) is defined for every "
+        "row: snapshots stop at as-of minus the horizon, so each has a full year "
+        "of follow-up. Secondary target log1p_days_remaining is non-null only "
+        "for objects that have reentered by the as-of date, i.e. it is "
+        "CONDITIONAL on reentry; always report it next to the primary.",
+        "Space weather is taken from obs_date - 1 (observed days only, gaps "
+        "forward-filled); forward-looking forecast features are not built "
+        "(INCLUDE_FORWARD_SW = False).",
+        "Splits are object-disjoint: each object is assigned to one split by a "
+        "seeded hash and contributes only snapshots inside that split's window "
+        "(train 2015-2020, valid 2022, test 2024+; 2021 and 2023 are gap years).",
     ]
 
     return {
         "keys": ["norad_cat_id", "obs_date", "epoch_index"],
         "targets": {
-            "regression": "days_remaining",
-            "regression_log": "log1p_days_remaining",
-            "survival": {"duration": "days_followed", "event": "event_observed"},
+            "primary": "reenters_within_horizon",
+            "secondary": {"column": "log1p_days_remaining", "conditional_on": "reentry observed by as-of date"},
         },
         "split": "split",
         "features": {
@@ -547,7 +585,8 @@ def feature_groups(panel: pd.DataFrame) -> dict:
             c
             for c in (
                 "lifetime_days", "decay_date", "is_decayed", "days_followed",
-                "days_remaining", "log1p_days_remaining", "n_decay_msgs",
+                "days_remaining", "log1p_days_remaining", "reenters_within_horizon",
+                "event_observed", "n_decay_msgs", "sw_asof_date",
                 "decay_pred_spread_days", "object_name", "object_id",
             )
             if c in cols
@@ -575,21 +614,28 @@ def report(objects: pd.DataFrame, panel: pd.DataFrame, asof: pd.Timestamp) -> No
         )
 
     print(f"\npanel.csv     {len(panel):>9,} rows x {panel.shape[1]:>3} cols")
+    print("  rows removed at each step:")
+    for label, n in panel.attrs.get("drop_log", []):
+        print(f"    {n:>10,}  {label}")
     print(f"  distinct objects        {panel['norad_cat_id'].nunique():>9,}")
-    ev = panel["event_observed"].eq(1)
-    print(f"  labelled (decay seen)   {ev.sum():>9,}")
-    print(f"  right-censored          {(~ev).sum():>9,}")
     print(
-        f"  epoch range             {panel['obs_date'].min().date()} -> "
+        f"  snapshot range          {panel['obs_date'].min().date()} -> "
         f"{panel['obs_date'].max().date()}"
     )
-    if ev.any():
-        dr = panel.loc[ev, "days_remaining"]
+    print(f"  {'split':<6} {'rows':>9} {'objects':>8} {'positives':>10} {'pos rate':>9}")
+    for sp in ("train", "valid", "test"):
+        d = panel[panel["split"] == sp]
+        if len(d):
+            print(
+                f"  {sp:<6} {len(d):>9,} {d['norad_cat_id'].nunique():>8,} "
+                f"{int(d['reenters_within_horizon'].sum()):>10,} {d['reenters_within_horizon'].mean():>9.1%}"
+            )
+    dr = panel["days_remaining"].dropna()
+    if len(dr):
         print(
-            f"  days_remaining: median {dr.median():,.0f}  "
+            f"  days_remaining (reentered objects only, n={len(dr):,}): median {dr.median():,.0f}  "
             f"p10 {dr.quantile(.1):,.0f}  p90 {dr.quantile(.9):,.0f}"
         )
-    print("  split sizes:", panel["split"].value_counts().to_dict())
 
     sw_cols = [c for c in panel.columns if c.startswith(("f107", "ap_mean", "kp_"))]
     if sw_cols:
@@ -604,12 +650,19 @@ def report(objects: pd.DataFrame, panel: pd.DataFrame, asof: pd.Timestamp) -> No
               f"p90 {age.quantile(.9):.1f}d")
 
     # Sanity checks that would otherwise rot silently.
-    assert (panel.loc[ev, "days_remaining"] >= 0).all(), "negative days_remaining"
-    assert panel["age_days"].min() >= 0, "epoch before launch"
-    assert not panel.duplicated(["norad_cat_id", "obs_date"]).any(), "duplicate epochs"
+    dr = panel["days_remaining"].dropna()
+    assert (dr > 0).all(), "reentry on or before the snapshot"
+    assert panel["age_days"].min() >= 0, "snapshot before launch"
+    assert not panel.duplicated(["norad_cat_id", "obs_date"]).any(), "duplicate snapshots"
     age = panel["element_age_days"].dropna()
     assert (age >= 0).all(), "orbit_asof matched a FUTURE element set"
     assert (age <= MAX_ELEMENT_AGE_DAYS).all(), "stale element set was not nulled out"
+    assert (panel["sw_asof_date"] < panel["obs_date"]).all(), "space weather from the snapshot day or later"
+    assert panel["obs_date"].max() <= asof - pd.Timedelta(days=HORIZON_DAYS), "snapshot without a full horizon"
+    assert panel.groupby("norad_cat_id")["split"].nunique().max() == 1, "object in more than one split"
+    pos = panel["reenters_within_horizon"].eq(1)
+    assert (panel.loc[pos, "days_remaining"] <= HORIZON_DAYS).all(), "positive label beyond the horizon"
+    assert panel.loc[~pos, "days_remaining"].dropna().gt(HORIZON_DAYS).all(), "negative label within the horizon"
     print("\nsanity checks passed")
 
 

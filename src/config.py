@@ -36,7 +36,7 @@ MIN_EPOCH = "1957-10-01"
 PERIGEE_DECAY_WINDOW_DAYS = 30
 # An as-of element older than this is too stale to trust; attach_orbit_history
 # leaves the *_asof columns null rather than use it.
-MAX_ELEMENT_AGE_DAYS = 45
+MAX_ELEMENT_AGE_DAYS = 30
 
 RANDOM_SEED = 20261019
 
@@ -58,3 +58,22 @@ GP_MAX_OBJECTS = 500
 
 # Forward-looking solar means need a forecast at prediction time -- off.
 INCLUDE_FORWARD_SW = False
+
+# --- Snapshot panel design (PLAN.md Decisions 3-6) ----------------------------
+# One row per (object, snapshot): the 1st of every month from SNAPSHOT_START to
+# as-of minus HORIZON_DAYS, so every snapshot has a full year of follow-up.
+SNAPSHOT_START = "2015-01-01"
+# A snapshot is kept only if the perigee on that date (from the as-of element
+# set, NOT satcat's terminal value) is at or below this.
+SNAPSHOT_MAX_PERIGEE_KM = 600.0
+# Junk only: active satellites hold altitude with thrusters (operator decision).
+JUNK_TYPES = ("DEBRIS", "ROCKET BODY", "R/B", "TBA", "UNKNOWN")
+
+# Chronological windows with gap years (2021, 2023) so no training label's
+# 365-day look-ahead resolves inside a later split's period.
+TRAIN_YEARS = (2015, 2020)
+VALID_YEARS = (2022, 2022)
+TEST_FROM_YEAR = 2024
+# Each OBJECT is assigned to exactly one split by a seeded hash of its id, then
+# contributes only snapshots inside that split's window (object-disjoint splits).
+SPLIT_FRACTIONS = {"train": 0.60, "valid": 0.20, "test": 0.20}
