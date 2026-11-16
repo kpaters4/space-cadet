@@ -19,12 +19,14 @@ teammate's notebook (`src/Models/classification_with_PLAN_requirements.ipynb`,
 PR #9) expects to have produced it — does not exist on `main` or on any open
 branch, confirmed by checking directly rather than assuming. A separate draft
 PR (#8, `junk-only-snapshot-build`) implements a similar but not identical
-design in `src/build_dataset.py`. The row/object counts and positive rates in
-this exact file match PR #9's notebook output exactly, so it is almost
-certainly that notebook's output panel, obtained outside git (consistent with
-the Space-Track no-redistribution license, and with why `data/raw`/
-`data/processed` are gitignored). **No one can currently regenerate this exact
-file from committed code.** See Limitations.
+design in `src/build_dataset.py`. Confirmed directly (not just inferred from
+matching row/object counts): this *is* `build_plan_dataset.py`'s output,
+obtained outside git — consistent with the Space-Track no-redistribution
+license, and with why `data/raw`/`data/processed` are gitignored. **The script
+itself is still not committed anywhere**, so knowing what produced this file
+and being able to regenerate it from code in the repo remain two different
+things — confirming provenance doesn't close that gap by itself. See
+Limitations.
 
 ## 1. Data & method
 
