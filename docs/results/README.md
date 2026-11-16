@@ -5,79 +5,80 @@ is edited by hand, so a number in these tables can always be traced back to a
 panel hash and a seed in `run_metadata.json`.
 
 ```bash
-# the real run, once data/processed/panel.csv exists
-uv run python src/Models/evaluate.py
+uv run python src/Models/evaluate.py \
+  --panel data/processed/panel.csv \
+  --feature-groups data/processed/feature_groups.json \
+  --out docs/results/junk_only_run \
+  --bootstrap 1000 \
+  --time-cv-folds 6
 
 # optional MLP candidate as well (PLAN Decision 12: optional, not required)
 uv run python src/Models/evaluate.py --with-mlp
 ```
 
-Output files:
+Output files, in `junk_only_run/`:
 
 | File | Contents |
 |---|---|
-| `RESULTS.md` | the readable results table, the space-weather ablation delta, and subgroup counts |
+| `RESULTS.md` | the readable train/valid results table, the space-weather ablation delta, and subgroup counts |
 | `results_valid.csv` | one row per task × model × feature set, every metric with 95% bootstrap bounds |
 | `error_by_group.csv` | one row per task × model × feature set × subgroup, always with `n_rows` and `n_objects` |
 | `run_metadata.json` | seed, panel sha256, library versions, split counts, solar tercile cut points, warnings |
+| `cv_sun_check.csv` | the supplementary time-ordered, object-grouped CV check, one row per fold × model × feature set |
+| `CV_SUN_CHECK.md` | the readable version of that CV check, with per-fold solar means and the aggregated with/without-sun delta |
 
-## Status — 2026-11-15
+## Status — 2026-11-16
 
-Before running on real data, `evaluate.py` was smoke-tested end-to-end on
-synthetic data from `src/make_sample_data.py` (not committed here — invented
-numbers, not a D3 deliverable) to confirm the pipeline, metrics, and guards
-work before trusting it with a scarce real sample.
+**`junk_only_run/` is the current and only result in this directory** — it
+supersedes every earlier run, including the pre-revision 10,000-object run
+that used to live here. Read `MODELING_NOTE.md` for the full writeup
+(comparison table, the sun-ablation reversal between the train/valid split and
+the CV check, selected model, error analysis, limitations).
 
-**`real_run_10000obj/` is real Space-Track + CelesTrak data**, but a **limited,
-pre-revision** run — read `MODELING_NOTE.md` in this directory for the full
-writeup (comparison table, selected model, error analysis, limitations). Three
-things still block a final run:
+**Panel provenance is the open item, not the pipeline.** `data/processed/panel.csv`
+is a real junk-only snapshot panel (PLAN Decisions 1, 3–6, 8: `DEBRIS`/
+`ROCKET BODY`/`UNKNOWN` only, monthly snapshots 2015-01 through as-of minus
+365 days, object-disjoint chronological splits), but it did not come from a
+script committed to this repo — see `MODELING_NOTE.md`'s opening note for the
+full explanation. The evaluation pipeline itself needs no further changes
+either way; what's missing is a committed builder to regenerate this file from.
 
-1. ~~`data/raw/SW-All.csv` was missing~~ — downloaded from CelesTrak, done.
-2. ~~`load_gp_history()` read the 47 GB file in one `pd.read_csv`~~ — fixed:
-   it now streams the file in chunks with `usecols` trimmed to just the columns
-   `normalize()` keeps, and reads it only for a random sample of eligible
-   objects (`config.GP_MAX_OBJECTS`, default 10,000; `--sample-objects N` /
-   `--no-sample-objects` on `build_dataset.py` to override). `real_run_10000obj/`
-   used a 10,000-object sample — 16.3% of the 61,474 eligible objects, of which
-   only 4,275 (42.8%) actually had any element-set history in the file. That
-   coverage gap (not the object count) is the binding constraint now; see the
-   modeling note.
-3. **Still open.** The panel builder still implements the *pre-revision* design:
-   percentile cuts on `obs_date` for splits, `EPOCHS_PER_OBJECT` epochs on a
-   jittered grid, no junk-type filter. PLAN Decisions 3–6 replace all of that
-   (calendar snapshots, perigee-at-date filter, junk types only, object-disjoint
-   splits). `real_run_10000obj/` found this directly: 72.7% of its valid rows
-   are `PAYLOAD`, not debris, because the junk-type filter isn't in yet. The
-   solar-activity tercile breakdown is also degenerate (100% `3_high`) — that
-   one needs a split-design fix, not more objects.
+**What changed in `evaluate.py` to run on this panel:**
 
-So the honest order now is: finish Decisions 3–6, rebuild the panel, then rerun
-the command above — the evaluation script itself does not need to change
-either way.
+1. `add_horizon_label()` used to unconditionally rebuild `reenters_within_horizon`
+   from a `days_followed` column. This panel's design guarantees every snapshot
+   already has a full horizon of follow-up, so it never needs `days_followed`
+   and ships the label directly — the old code raised `KeyError: 'days_followed'`
+   on it. Fixed: if `reenters_within_horizon` is present and `days_followed`
+   isn't, the frame is trusted and passed through unchanged (verified by
+   recomputing the label independently and diffing against the stored one:
+   zero disagreements on this panel).
+2. New `--time-cv-folds N` flag: the train/valid split's validation rows sit
+   entirely in one solar-activity tercile (100% `3_high`), so the main
+   sun-vs-no-sun ablation can't tell "the Sun doesn't help" apart from "this
+   split never tested it." This runs a walk-forward, object-grouped CV
+   entirely inside `train` instead, where there's genuine solar variation to
+   test against. See `time_ordered_object_folds()` / `run_time_ordered_object_cv()`.
 
 ## What the script reports, and why
 
-**Both tasks**, because PLAN Decision 1 (primary target) is still open:
+**Both tasks**, because PLAN Decision 1 (primary target) is formally still
+marked "Open" in PLAN.md's own text, even though this panel and this note
+already treat `reenters_within_horizon` as primary:
 
 * `reenters_within_horizon` (365 days) — PR-AUC as the headline because positives
   are rare, Brier for probability quality, and recall at a fixed 10% false-alarm
-  rate for the shoot-or-skip decision. The label is derived in the script, not
-  stored in the panel: positive = reentry observed inside the horizon, negative =
-  followed a full horizon with no reentry, and rows censored before the horizon
-  closed are dropped rather than counted as survivors.
+  rate for the shoot-or-skip decision.
 * `log1p_days_remaining` — MAE/RMSE in log1p days plus median absolute error in
-  days, on observed reentries only. This target is conditional on having come
-  down, which is the bias Decision 1 is about; report it alongside the horizon
-  label, never alone.
+  days, on observed reentries only. Conditional on having come down; report it
+  alongside the horizon label, never alone.
 
 **Four models × two feature sets.** Baselines are the base rate and the
 physics-flavoured extrapolation (days until perigee reaches 120 km at the trailing
 30-day descent rate); candidates are logistic regression / Ridge and
 HistGradientBoosting, each inside a scikit-learn `Pipeline`. Feature sets are
 `baseline_no_sun` and `with_sun_trailing` straight from
-`data/processed/feature_groups.json`, so "does the Sun help?" is the difference
-between two rows of the same table. Baselines ignore the feature set by
+`data/processed/feature_groups.json`. Baselines ignore the feature set by
 construction and their delta is therefore exactly 0 — that is a check on the
 table, not a finding.
 
@@ -85,13 +86,16 @@ table, not a finding.
 
 * Test rows are dropped chunk by chunk while the panel is read, so no test feature
   value is ever loaded; only test row/object counts reach `run_metadata.json`.
+  The supplementary CV check (`--time-cv-folds`) is even stricter: it only ever
+  touches rows already inside `train`.
 * Any overlap between a feature set and `leakage_never_use_as_features` aborts the
   run.
 * Imputation medians, scalers, one-hot vocabularies, the fixed-false-alarm-rate
   threshold and the solar-activity tercile cut points are all fitted on train and
   applied to valid.
-* Intervals bootstrap **objects**, not rows: one object contributes many correlated
-  epochs, and resampling rows would make every interval look far tighter than it is.
+* Intervals bootstrap **objects**, not rows, in the main comparison; the CV check's
+  "interval" is the spread across its 5 folds instead, for the same reason
+  (one object contributes several correlated epochs).
 * Subgroups below `--min-group-rows` (default 30) get counts but no metrics.
 * Seeds are fixed (`config.RANDOM_SEED`) and the whole run is byte-identical across
   repeat invocations.

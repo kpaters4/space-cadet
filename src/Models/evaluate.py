@@ -194,7 +194,23 @@ def add_horizon_label(df: pd.DataFrame, horizon: float) -> pd.DataFrame:
       negative -- watched for a full horizon after obs_date, no reentry
       undefined -- censored before the horizon closed (dropped; keeping these as
                    negatives would label "we stopped looking" as "it survived")
+
+    The junk-only snapshot panel (PLAN Decisions 3-6) doesn't need any of this:
+    every snapshot is sampled at or before as-of minus `horizon` days, so a full
+    horizon of follow-up is guaranteed by construction and the panel already
+    ships `reenters_within_horizon` directly -- there is no `days_followed`
+    column to rebuild it from, and none of the three branches above can ever
+    produce "undefined" on that panel anyway. Recomputing from `days_followed`
+    only matters for the older panel design, where epochs were spread across
+    an object's full life and some rows genuinely hadn't been watched a full
+    horizon yet. So: if the label is already there and the column this
+    function would need isn't, trust the panel and pass it through unchanged
+    rather than raising a KeyError over a column that was never supposed to
+    exist for this design.
     """
+    if "reenters_within_horizon" in df.columns and "days_followed" not in df.columns:
+        return df.copy()
+
     df = df.copy()
     event = df["event_observed"].fillna(0).astype(int).eq(1)
     days_remaining = pd.to_numeric(df["days_remaining"], errors="coerce")
@@ -682,6 +698,118 @@ def run_task(
 
 
 # --------------------------------------------------------------------------- #
+# supplementary check: does the Sun help when solar conditions actually vary?
+# --------------------------------------------------------------------------- #
+# Only meaningful when the main train/valid split's validation rows sit inside
+# a single solar-activity tercile (see group_assignments / the solar_tercile_*
+# rows in error_by_group.csv) -- in that case the main ablation in run_task()
+# cannot distinguish "the Sun doesn't help" from "this split never tested it".
+# This never touches `valid` or `test`: every fold is carved out of `train`
+# alone, so it adds a check without spending any of the held-out data.
+def time_ordered_object_folds(train_df: pd.DataFrame, n_folds: int) -> list[np.ndarray]:
+    """Chronologically-ordered, object-disjoint blocks within `train`.
+
+    Each object is assigned once, to the block matching its EARLIEST obs_date
+    in train; every row that object contributes travels with it. Sorting
+    objects by that date before cutting into `n_folds` equal blocks makes the
+    blocks chronological by construction (block 0 is earliest, block
+    n_folds-1 is latest) while keeping every object wholly on one side of
+    every boundary -- the "grouped by object" half of the requirement. It is
+    an approximation of a strict per-row time cut: an object whose snapshots
+    span two blocks' calendar ranges still moves as a unit, which is the
+    price of never letting the same object leak across a fold boundary.
+    """
+    first_seen = train_df.groupby("norad_cat_id")["obs_date"].min().sort_values()
+    return list(np.array_split(first_seen.index.to_numpy(), n_folds))
+
+
+def run_time_ordered_object_cv(
+    task: str, frame: pd.DataFrame, feature_sets: dict[str, dict], args, n_folds: int
+) -> tuple[list[dict], list[dict]]:
+    """Walk-forward CV, blocked and ordered as above, entirely inside `train`.
+
+    Fold k (k = 1 .. n_folds-1) fits on blocks 0..k-1 and scores on block k --
+    each step adds one more chronological block to the training side, same
+    shape as an expanding walk-forward backtest. Candidates only (baselines
+    ignore features, so an ablation on them is vacuous); no bootstrap -- the
+    folds themselves are the repetition, reported as a mean +/- spread across
+    folds rather than a per-point interval.
+    """
+    train_all = frame[frame["split"] == "train"].reset_index(drop=True)
+    if train_all.empty:
+        return [], [{"task": task, "problem": "no train rows to run the CV check on"}]
+
+    blocks = time_ordered_object_folds(train_all, n_folds)
+    block_sizes = [len(b) for b in blocks]
+    if min(block_sizes) < 10:
+        return [], [
+            {
+                "task": task,
+                "problem": f"a CV block has only {min(block_sizes)} objects "
+                f"(n_folds={n_folds} may be too many for {train_all['norad_cat_id'].nunique()} "
+                "train objects) -- skipped",
+            }
+        ]
+
+    rows, notes = [], []
+    for feature_set, spec in feature_sets.items():
+        columns = spec["columns"]
+        for fold_idx in range(1, n_folds):
+            inner_train_ids = np.concatenate(blocks[:fold_idx])
+            inner_valid_ids = blocks[fold_idx]
+            inner_train = train_all[train_all["norad_cat_id"].isin(inner_train_ids)]
+            inner_valid = train_all[train_all["norad_cat_id"].isin(inner_valid_ids)]
+            if inner_train.empty or inner_valid.empty:
+                continue
+            if task == "classification" and (
+                inner_train["y"].nunique() < 2 or inner_valid["y"].nunique() < 2
+            ):
+                continue
+
+            solar_note = {
+                "task": task,
+                "feature_set": feature_set,
+                "fold": fold_idx,
+                "inner_train_objects": int(inner_train["norad_cat_id"].nunique()),
+                "inner_valid_objects": int(inner_valid["norad_cat_id"].nunique()),
+                "inner_train_f107_mean": float(inner_train["f107_adj_mean_81d"].mean()),
+                "inner_valid_f107_mean": float(inner_valid["f107_adj_mean_81d"].mean()),
+            }
+            notes.append(solar_note)
+
+            numeric, categorical = split_feature_types(inner_train, columns)
+            for name, pipe in candidates(task, numeric, categorical, args.seed, args.with_mlp).items():
+                X_train, X_valid = inner_train[columns], inner_valid[columns]
+                pipe.fit(X_train, inner_train["y"])
+                if task == "classification":
+                    valid_score = pipe.predict_proba(X_valid)[:, 1]
+                    train_score = pipe.predict_proba(X_train)[:, 1]
+                    threshold = threshold_at_far(inner_train["y"].to_numpy(), train_score, args.far)
+                    point = classification_metrics(inner_valid["y"].to_numpy(), valid_score, threshold)
+                else:
+                    valid_score = pipe.predict(X_valid)
+                    point = regression_metrics(
+                        inner_valid["y"].to_numpy(), valid_score, inner_valid["days_true"].to_numpy()
+                    )
+                rows.append(
+                    {
+                        "task": task,
+                        "model": name,
+                        "feature_set": feature_set,
+                        "fold": fold_idx,
+                        "n_train_rows": int(len(inner_train)),
+                        "n_train_objects": solar_note["inner_train_objects"],
+                        "n_valid_rows": int(len(inner_valid)),
+                        "n_valid_objects": solar_note["inner_valid_objects"],
+                        "train_f107_mean": solar_note["inner_train_f107_mean"],
+                        "valid_f107_mean": solar_note["inner_valid_f107_mean"],
+                        **point,
+                    }
+                )
+    return rows, notes
+
+
+# --------------------------------------------------------------------------- #
 # output
 # --------------------------------------------------------------------------- #
 def to_markdown(df: pd.DataFrame, float_fmt: str = "{:.4g}") -> str:
@@ -839,6 +967,73 @@ def ablation_delta(part: pd.DataFrame, metric: str, task: str) -> pd.DataFrame |
     return wide
 
 
+def write_cv_outputs(cv_df: pd.DataFrame, meta: dict, out_dir: Path) -> list[Path]:
+    """The supplementary time-ordered, object-grouped CV check -- kept in its
+    own files, never merged into RESULTS.md's main train/valid table, because
+    it answers a different question (does the Sun help when solar conditions
+    actually vary, inside train) from the one that table answers (does the
+    Sun help on this specific valid split)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cv_df.to_csv(out_dir / "cv_sun_check.csv", index=False)
+
+    # classification and regression rows share this one dataframe but populate
+    # different metric columns (pr_auc vs. mae_log1p_days) -- pick per task,
+    # not once globally, or the other task's column is silently all-NaN.
+    metric_for_task = {"classification": "pr_auc", "regression": "mae_log1p_days"}
+    lines = [
+        "# Supplementary check -- does the Sun help when solar conditions actually vary?",
+        "",
+        "Time-ordered, object-grouped walk-forward CV, entirely inside `train` "
+        f"(`--time-cv-folds {int(cv_df['fold'].max()) + 1}`). Fold *k* trains on "
+        "chronological blocks before it and scores on the next block; no `valid` "
+        "or `test` row is ever touched by this check. Candidates only -- the "
+        "baselines ignore features, so an ablation on them is vacuous.",
+        "",
+        "Run this because the main train/valid split's validation rows sit in a "
+        "single solar-activity tercile (see `solar_tercile_*` in `error_by_group.csv`), "
+        "so that split's own sun-vs-no-sun ablation cannot tell \"the Sun doesn't "
+        "help\" apart from \"this split never tested it.\" Training spans a real "
+        "solar range, so each fold boundary below is a genuine before/after in "
+        "F10.7 -- read the `train_f107_mean` / `valid_f107_mean` columns per fold "
+        "before trusting any delta.",
+        "",
+    ]
+
+    for task in sorted(cv_df["task"].unique()):
+        part = cv_df[cv_df["task"] == task]
+        metric = metric_for_task.get(task)
+        if metric is None or metric not in part.columns or part[metric].isna().all():
+            lines += [f"## {task}", "", "_(no metric column found for this task)_", ""]
+            continue
+        lines += [f"## {task}", ""]
+        per_fold = part[
+            ["fold", "model", "feature_set", "n_train_objects", "n_valid_objects",
+             "train_f107_mean", "valid_f107_mean", metric]
+        ].sort_values(["fold", "model", "feature_set"])
+        lines += [to_markdown(per_fold), ""]
+
+        agg = (
+            part.groupby(["model", "feature_set"])[metric]
+            .agg(["mean", "std", "count"])
+            .reset_index()
+            .rename(columns={"mean": f"{metric}_mean_across_folds", "std": f"{metric}_std_across_folds"})
+        )
+        wide = agg.pivot_table(
+            index="model", columns="feature_set",
+            values=f"{metric}_mean_across_folds",
+        )
+        if {"baseline_no_sun", "with_sun_trailing"}.issubset(wide.columns):
+            delta = (wide["with_sun_trailing"] - wide["baseline_no_sun"]).reset_index()
+            delta.columns = ["model", f"delta_{metric}_with_sun_minus_no_sun"]
+            lines += [
+                f"**Mean {metric} across folds, with vs. without sun:**", "",
+                to_markdown(delta), "",
+            ]
+
+    (out_dir / "CV_SUN_CHECK.md").write_text("\n".join(lines), encoding="utf-8")
+    return [out_dir / "cv_sun_check.csv", out_dir / "CV_SUN_CHECK.md"]
+
+
 def sha256(path: Path, limit_bytes: int = 256 * 1024 * 1024) -> str:
     h = hashlib.sha256()
     read = 0
@@ -867,6 +1062,16 @@ def parse_args(argv: list[str] | None):
     ap.add_argument("--min-group-rows", type=int, default=30, help="smallest subgroup that gets metrics")
     ap.add_argument("--seed", type=int, default=RANDOM_SEED)
     ap.add_argument("--with-mlp", action="store_true", help="also fit the optional MLP candidate")
+    ap.add_argument(
+        "--time-cv-folds", type=int, default=0,
+        help=(
+            "run a supplementary time-ordered, object-grouped walk-forward CV entirely "
+            "inside `train` (0 = skip). Use this when the main train/valid split's valid "
+            "rows sit in a single solar-activity tercile -- see solar_tercile_* rows in "
+            "error_by_group.csv -- since in that case the main sun-vs-no-sun ablation "
+            "cannot tell 'the Sun doesn't help' apart from 'this split never tested it'."
+        ),
+    )
     ap.add_argument(
         "--banner", default=None,
         help="provenance warning stamped on every output (use it when the panel is not real data)",
@@ -899,6 +1104,7 @@ def main(argv: list[str] | None = None) -> None:
 
     tasks = ("classification", "regression") if args.task == "both" else (args.task,)
     all_results, all_errors, all_notes = [], [], []
+    all_cv_rows, all_cv_notes = [], []
     for task in tasks:
         frame = (
             classification_frame(df, args.horizon_days)
@@ -916,6 +1122,17 @@ def main(argv: list[str] | None = None) -> None:
                 warnings.append(f"{task}: {note['problem']}")
             else:
                 all_notes.append(note)
+
+        if args.time_cv_folds:
+            cv_rows, cv_notes = run_time_ordered_object_cv(
+                task, frame, feature_sets, args, args.time_cv_folds
+            )
+            all_cv_rows += cv_rows
+            for note in cv_notes:
+                if "problem" in note:
+                    warnings.append(f"{task} time-ordered CV: {note['problem']}")
+                else:
+                    all_cv_notes.append(note)
 
     if not all_results:
         sys.exit("nothing could be evaluated:\n  " + "\n  ".join(warnings))
@@ -947,6 +1164,14 @@ def main(argv: list[str] | None = None) -> None:
     }
 
     written = write_outputs(results, errors, meta, args.out)
+
+    if all_cv_rows:
+        cv_df = pd.DataFrame(all_cv_rows)
+        cv_written = write_cv_outputs(cv_df, meta, args.out)
+        written += cv_written
+    elif args.time_cv_folds:
+        warnings.append("--time-cv-folds was set but produced no rows -- see the problem warnings above")
+
     print("\nwrote:")
     for path in written:
         print(f"  {path}")
