@@ -1,6 +1,8 @@
 ## space-cadet
 
-# Research Question: Can we predict how many days a piece of space junk has left before it burns up, and does knowing what the Sun is doing make the prediction better?
+# Research Question: Can we predict whether a piece of space junk will burn up within the next 365 days, and does knowing what the Sun is doing make the prediction better?
+
+*(Updated 2026-11-17 to match PLAN.md Decision 1. The original wording asked for the number of days left. That target still exists in the panel as a secondary label, but the headline question is now the 365-day yes/no.)*
 
 Idea: A short arcade-style game where you're a cadet with limited space shots and a sky full of space junk. Shooting creates fragments, so the skill is knowing which pieces will fall on their own which wil stay up for decades.
 
@@ -14,10 +16,10 @@ Idea: A short arcade-style game where you're a cadet with limited space shots an
 | Space-Track `gp_history` | orbital element history — one row per element set per object, across its life | free account required |
 
 The first three join through one idea: satcat is the spine (`NORAD_CAT_ID`),
-decay supplies the event, and space weather attaches by calendar day to an
-*observation epoch* — "what we would have known on this date". Space weather has
-no object key and the Space-Track tables have no date key, so without that epoch
-there is nothing to join on. `gp_history` fixes the biggest weakness in the
+decay supplies the event, and space weather attaches by calendar day to a
+monthly *snapshot date* — "what we would have known on this date". Space weather
+has no object key and the Space-Track tables have no date key, so without that
+snapshot there is nothing to join on. `gp_history` fixes the biggest weakness in the
 other three: see [Orbit features](#orbit-features) below.
 
 ## Setup
@@ -55,7 +57,7 @@ python src/build_dataset.py
 Writes to `data/processed/`:
 
 - **`objects.csv`** — one row per catalogued object: launch, reentry, lifetime, orbit, type, size.
-- **`panel.csv`** — **the modelling table.** One row per (object, observation epoch), with the label `days_remaining` and the space weather as of that epoch.
+- **`panel.csv`** — **the modelling table.** One row per (object, monthly snapshot) for junk objects only, with the label `reenters_within_horizon` (does it reenter within 365 days of the snapshot?) and the space weather as of the day before. Object-disjoint `split` column: train 2015–2020, valid 2022, test 2024 onward, with gap years 2021 and 2023 (PLAN.md Decisions 3–6 and 13).
 - **`feature_groups.json`** — which columns are orbit vs. space weather vs. known-only-after-the-fact, plus ready-made feature lists for the ablation. This one is checked into the repo (see below) so it's visible without running the pipeline; running the build overwrites it in place with the schema from your real data.
 - **`space_weather_daily.csv`**, **`space_weather_monthly_forecast.csv`** — the cleaned solar series on their own.
 
@@ -96,23 +98,27 @@ much the leaky snapshot would have been inflating the score.
 
 ## Why a panel instead of one row per object
 
-"Days left" only means something relative to a moment of observation, and one
-row per object can carry only one such moment — on which the Sun's behaviour is
-a single day's noise. So each object contributes several epochs across its life:
-the label is days from that epoch to reentry, the features are what the Sun had
-been doing up to it. That is what makes the second half of the research question
-answerable at all.
+"Will it fall within a year?" only means something relative to a moment of
+observation, and one row per object can carry only one such moment — on which the
+Sun's behaviour is a single day's noise. So each object contributes a row for the
+1st of every month it is in orbit, from 2015 to one year before the data's as-of
+date: the label is whether it reentered within 365 days of that date, and the
+features are what the object's orbit and the Sun looked like up to it. That is
+what makes the second half of the research question answerable at all.
 
-Objects still in orbit are kept as right-censored rows (`event_observed = 0`,
-`days_remaining` null, `days_followed` = how long we watched). Survival models
-should use them; drop them for plain regression. They are the majority of the
-catalogue and throwing them away would bias everything toward things that fall
-fast.
+Every snapshot has a full year of follow-up, so objects still in orbit get a
+clean label of 0 instead of being dropped, which would bias everything toward
+things that fall fast. Snapshots are kept only for junk objects (debris, rocket
+bodies, unknown types, whose reentry is physics rather than an operator's choice)
+with perigee at or below 600 km. The days-left label (`log1p_days_remaining`)
+exists only for objects that have already fallen, so it is secondary and always
+conditional on reentry.
 
 ## Answering the second half of the question
 
 `feature_groups.json` ships nested feature sets. Fit the same model on each,
-compare on the `test` split, and the gap *is* the answer:
+compare on the `valid` split (keep `test` sealed for the final check), and the gap
+*is* the answer:
 
 | Set | Features |
 |---|---|
@@ -121,9 +127,11 @@ compare on the `test` split, and the gap *is* the answer:
 | `with_sun_and_forecast` | + forward-looking solar means (needs a forecast at inference time) |
 | `baseline_no_sun_leaky_orbit`, `with_sun_trailing_leaky_orbit` | the same two, but with `orbit_terminal` instead of `orbit_asof` — compare against `baseline_no_sun` to see how much the leaky snapshot was inflating the score |
 
-Suggested target: `log1p_days_remaining` — the raw label spans days to decades.
-Suggested metric: median absolute error in log space, or a survival
-concordance index if you keep the censored rows.
+Target: `reenters_within_horizon` (PLAN.md Decision 1). Positives are rare, so use
+PR-AUC as the headline, plus the Brier score and recall at a fixed false-alarm rate,
+with intervals from resampling by object (one object contributes many correlated
+snapshots). If you report `log1p_days_remaining`, use median absolute error in log
+space and say it is conditional on reentry.
 
 ## Known limitations — read before trusting a number
 
@@ -143,14 +151,20 @@ concordance index if you keep the censored rows.
 4. **Catalogue bias.** Small debris is tracked inconsistently and historical
    coverage is thinner the further back you go, so the early record is not a
    random sample.
-5. **Split caveat.** The default split cuts on `obs_date`, which is the honest
-   test of forecasting forward in time but lets one object land in two splits.
-   Group on `norad_cat_id` for an object-disjoint split.
+5. **Split design.** Each object is assigned to exactly one split by a seeded
+   hash of its id, and then contributes only snapshots inside that split's years
+   (train 2015–2020, valid 2022, test 2024 onward, gap years 2021 and 2023), so
+   splits are object-disjoint and forward in time. The hash rule has modulo bias:
+   the real shares are 76.6% / 11.7% / 11.7%, not 70/15/15 (PLAN.md Decision 13).
+   Validation sits in a single solar-activity tercile, so a validation score alone
+   cannot say whether the Sun helps; use the time-ordered cross-validation inside
+   training for that. The test split has already been scored once, so treat it as a
+   development holdout.
 
 ## Layout
 
 ```
-src/config.py            paths and tunables (epochs per object, perigee cut, seed)
+src/config.py            paths and tunables (snapshot window, perigee cut, split seed and years)
 src/fetch_spacetrack.py  authenticated download of satcat + decay
 src/fetch_gp_history.py  authenticated download of gp_history, scoped to eligible objects
 src/normalize.py         canonical column names across Space-Track's header variants
