@@ -16,16 +16,20 @@ from the two designs.
 it affects how much to trust everything else: this `panel.csv` was not built by
 a script that lives in this repo. `src/build_plan_dataset.py` — the module a
 teammate's notebook (`src/Models/classification_with_PLAN_requirements.ipynb`,
-PR #9) expects to have produced it — does not exist on `main` or on any open
-branch, confirmed by checking directly rather than assuming. A separate draft
-PR (#8, `junk-only-snapshot-build`) implements a similar but not identical
-design in `src/build_dataset.py`. Confirmed directly (not just inferred from
-matching row/object counts): this *is* `build_plan_dataset.py`'s output,
-obtained outside git — consistent with the Space-Track no-redistribution
-license, and with why `data/raw`/`data/processed` are gitignored. **The script
-itself is still not committed anywhere**, so knowing what produced this file
-and being able to regenerate it from code in the repo remain two different
-things — confirming provenance doesn't close that gap by itself. See
+originally added by PR #9, now closed and superseded by the merged PR #10)
+expects to have produced it — does not exist on `main`, confirmed by checking
+directly rather than assuming (still true after PR #8 and PR #10 merged).
+PR #8 (`junk-only-snapshot-build`) has since merged into `main`, so there is
+now one agreed `build_dataset.py` design rather than two competing drafts —
+but it is a similar, not identical, design to whatever produced this exact
+file, and it still isn't what built this specific panel. Confirmed directly
+(not just inferred from matching row/object counts): this *is*
+`build_plan_dataset.py`'s output, obtained outside git — consistent with the
+Space-Track no-redistribution license, and with why `data/raw`/`data/processed`
+are gitignored. **The script itself is still not committed anywhere**, so
+knowing what produced this file and being able to regenerate it from code in
+the repo remain two different things — confirming provenance doesn't close
+that gap by itself, and merging PR #8 didn't either. See
 Limitations.
 
 ## 1. Data & method
@@ -154,18 +158,23 @@ Full tables, every model × feature set × group, with counts: `error_by_group.c
 ## 6. Limitations
 
 1. **Panel provenance is unresolved.** This file isn't reproducible from
-   committed code (see the note at the top). Before this becomes a final D3
-   number, the team needs to either commit `src/build_plan_dataset.py`, or
-   converge on PR #8's `build_dataset.py` as the one builder, and rebuild from
-   that instead of a file that arrived outside git.
-2. **Two non-identical "junk-only" builder implementations exist** (PR #8 vs.
-   whatever produced this file vs. PR #9's missing module) — "the team agreed
-   on this design" is true in spirit, not yet true in code.
-3. **Test has already been looked at.** PR #9's notebook explicitly treats its
-   own test numbers as a "development holdout... already viewed," not a blind
-   final check. This run never read test, but if test is needed as a genuinely
-   blind check later, that decision — burn it and move on, or draw a fresh one
-   — needs to be made explicitly by the team, not left implicit.
+   committed code (see the note at the top). PR #8 merging into `main` closed
+   one gap (one agreed `build_dataset.py` instead of competing drafts) but not
+   this one: the team still needs to either commit `src/build_plan_dataset.py`,
+   or confirm `main`'s now-merged builder reproduces this exact file, rather
+   than treating a file that arrived outside git as the source of truth.
+2. **Two non-identical "junk-only" builder implementations existed** (PR #8
+   vs. whatever produced this file vs. PR #9's missing module); PR #8 is now
+   merged, so this is down to one committed design vs. one still-uncommitted
+   one, not two competing committed ones — an improvement, not a resolution.
+3. **Test has already been looked at.** The merged test notebook
+   (`src/Models/classification_with_PLAN_requirements_test.ipynb`, from PR
+   #10, which replaced PR #9) explicitly says an earlier notebook version
+   already reported test scores and performed test error analysis, so its own
+   numbers are "descriptive," not an untouched final check. This run never
+   read test, but if test is needed as a genuinely blind check later, that
+   decision — burn it and move on, or draw a fresh one — needs to be made
+   explicitly by the team, not left implicit.
 4. **The sun-vs-no-sun train→valid comparison and the CV check disagree on
    regression for `hist_gb`** (§3). I've given my read on which to trust and
    why, but it's a real, stated disagreement, not quietly resolved.
