@@ -47,16 +47,16 @@ the report has to state their limits (see "Known gaps" further down).
 ## Where we are (2026-11-17)
 
 **On `main`:** the junk-only snapshot build (PR #8, Decisions 3–6 and 8) and the
-train/validation and test notebooks (PR #10, in `src/Models/`).
+train/validation and test notebooks (PR #10, with readable result tables from PR #11,
+in `src/Models/`).
 
 **Open:**
 
 | PR | What | State |
 |---|---|---|
 | #7 | Phase 4 evaluation (`src/Models/evaluate.py`, results in `docs/results/`) | Changes requested: the object sampler must use the same eligibility filter as `fetch_gp_history.eligible_ids()`. |
-| #11 | Readable notebook result tables | Approved, open. |
-| #12 | `src/compare_panels.py`: diff two panel builds (counts only, no data rows) | Open. |
-| #13 | Object-to-split rule aligned with the D3 panel (Decision 13: keep the rule as is) | Draft, waiting on review. |
+| #12 | `src/compare_panels.py`: diff two panel builds (counts only, no data rows) | Open, waiting on a review (`main` requires one). |
+| #13 | Object-to-split rule aligned with the D3 panel (Decision 13: keep the rule as is) | Draft, waiting on a review (`main` requires one). |
 | (none) | Branch `codex/plan-backblaze-panel-builder`: the Backblaze loader and builder | No PR yet. Built on pre-#8 `main`, conflicts in `build_dataset.py`, needs a rebase. |
 
 **Known gaps — read before trusting a number:**
