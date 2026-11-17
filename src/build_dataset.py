@@ -67,6 +67,7 @@ from config import (
     PANEL,
     PERIGEE_DECAY_WINDOW_DAYS,
     PROCESSED,
+    RANDOM_SEED,  # still imported: the gp_history object sampler (PR #7) seeds with it
     SATCAT,
     SNAPSHOT_MAX_PERIGEE_KM,
     SNAPSHOT_START,
