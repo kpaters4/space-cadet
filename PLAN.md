@@ -12,18 +12,26 @@ D3 Mon Nov 16 · D4 Mon Nov 23 · D5 Mon Nov 30 · D6 report Wed Dec 2 · demo D
 
 ### Open
 
-**Decision 1 — Primary target (group to decide, before D1 is submitted).**
-- Option A, recommended: `reenters_within_horizon` — will it reenter within 365 days?
-- Option B: `log1p_days_remaining` — how many days are left?
-- Why A: recent snapshots only get a days-left label if the object has already
-  fallen, so a days-left test set fills up with short-lived objects. In the old
-  panel, 76% of test rows were censored versus 29% of training rows. The 365-day
-  label is defined for every snapshot that has a year of follow-up, uses objects
-  that did not fall, and matches the game's shoot-or-skip decision directly.
-- If B is chosen: state in D1 that the target is conditional on reentry, and report
-  it alongside A rather than alone.
-- To record the choice: set `PRIMARY_TARGET` in `src/config.py`, update the README
-  question, and log it here.
+**Decision 13 — Object-to-split rule (team to decide; see PR #13).**
+The panel behind the D3 results assigns each object to a split with the first byte
+of SHA-256(`"20261021:<norad_cat_id>"`) % 100, cut at 70 and 85. A byte runs 0–255,
+so that rule has modulo bias and its real shares are **76.6% train / 11.7% valid /
+11.7% test**, not 70/15/15. (`main` used a different rule, a pandas hash at
+60/20/20; on the same raw data about 26% of shared objects landed in different
+splits.)
+- Option A, in PR #13: keep the rule bit-for-bit. All existing results stay valid
+  and reproducible from the repo. Validation and test have fewer objects (612 and
+  508 on the full panel), so intervals are wider.
+- Option B: fix the bias with a proper 70/15/15 draw. Fairer shares, but the
+  objects in every split change, so every result and the test split are rerun.
+- `tests/test_splits.py` pins the shares, so changing the rule is a deliberate
+  decision, not an accident.
+
+### Made (2026-11-17)
+
+| # | Decision | Reason |
+|---|---|---|
+| 1 | Primary target: `reenters_within_horizon` (will it reenter within 365 days?). `log1p_days_remaining` stays in the panel as a secondary target but is not a headline result. | Every snapshot with a year of follow-up gets a label and objects that did not fall are included. It matches the game's shoot-or-skip decision, and the game needs no timer. A days-left label exists only for objects that have already fallen, so its test set fills with short-lived objects (old panel: 76% of test rows censored vs 29% of training rows). Recorded 2026-11-17; confirm in review of this PR. |
 
 ### Made (2026-10-21, on review of the original pipeline)
 
@@ -40,6 +48,42 @@ D3 Mon Nov 16 · D4 Mon Nov 23 · D5 Mon Nov 30 · D6 report Wed Dec 2 · demo D
 | 10 | No survival models | scikit-learn does not support them natively and the course requires a scikit-learn Pipeline. The 365-day label gets most of the benefit. |
 | 12 | Neural network candidate (MLP) downgraded from required to optional | Course requirement changed: at least two candidate models vs. baseline is sufficient; a neural net is no longer mandated. Logistic regression + gradient boosting now satisfy D3 on their own. |
 | 11 | `uv` + `pyproject.toml` + `uv.lock`; `requirements.txt` removed | Course requirement; one source of truth for dependencies. |
+
+---
+
+## Where we are (2026-11-17)
+
+**On `main`:** the junk-only snapshot build (PR #8, Decisions 3–6 and 8) and the
+train/validation and test notebooks (PR #10, in `src/Models/`).
+
+**Open:**
+
+| PR | What | State |
+|---|---|---|
+| #7 | Phase 4 evaluation (`src/Models/evaluate.py`, results in `docs/results/`) | Changes requested: the object sampler must use the same eligibility filter as `fetch_gp_history.eligible_ids()`. |
+| #11 | Readable notebook result tables | Approved, open. |
+| #12 | `src/compare_panels.py`: diff two panel builds (counts only, no data rows) | Open. |
+| #13 | Object-to-split rule aligned with the D3 panel (Decision 13) | Draft, needs the team's decision. |
+| (none) | Branch `codex/plan-backblaze-panel-builder`: the Backblaze loader and builder | No PR yet. Built on pre-#8 `main`, conflicts in `build_dataset.py`, needs a rebase. |
+
+**Known gaps — read before trusting a number:**
+1. **The D3 panel is not reproducible from `main` yet.** The panel the notebooks and
+   the Phase 4 results ran on came from a Backblaze-based builder that is not on
+   `main`. Checked on a local-data run: swapping that builder's split rule into
+   `main`'s build reproduces it (all 3,288 rows, labels and splits equal). The one
+   remaining difference: it drops 156 of 44,029 junk objects (0.35%) whose only
+   decay record is a *Prediction* message, treating them as decayed. Decision 7
+   says predictions must not mark an object decayed, so `main` keeps them.
+2. **The test split has already been scored** by an earlier notebook version. Treat
+   it as a development holdout; a genuinely blind final check needs an explicit
+   team decision.
+3. **The Sun question is not settled.** Validation (2022) sits in one solar-activity
+   tercile. The time-ordered cross-validation inside training (PR #7) is mixed:
+   gradient boosting +0.019 PR-AUC with the Sun, logistic −0.013. Read that as "no
+   clear effect yet", not "the Sun does not matter".
+4. **Folder name.** Code and notebooks live in `src/Models/` (capital M). Keep it:
+   macOS and Windows treat `Models` and `models` as one folder, so do not add a
+   lowercase `src/models/`.
 
 ---
 
@@ -133,7 +177,7 @@ Error analysis: by perigee band, object type, size, and solar-activity tercile,
 always with counts.
 
 Prompt
-> Implement Phase 4 in `src/models/evaluate.py`. Train on train, score on valid only,
+> Implement Phase 4 in `src/Models/evaluate.py`. Train on train, score on valid only,
 > for both baselines and all candidates, with and without space weather. Write a
 > results table and error-by-group tables (with counts) to `docs/results/`. Fixed
 > seeds. Do not read test rows.
