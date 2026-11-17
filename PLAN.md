@@ -12,25 +12,33 @@ D3 Mon Nov 16 · D4 Mon Nov 23 · D5 Mon Nov 30 · D6 report Wed Dec 2 · demo D
 
 ### Open
 
-**Decision 13 — Object-to-split rule (team to decide; see PR #13).**
-The panel behind the D3 results assigns each object to a split with the first byte
-of SHA-256(`"20261021:<norad_cat_id>"`) % 100, cut at 70 and 85. A byte runs 0–255,
-so that rule has modulo bias and its real shares are **76.6% train / 11.7% valid /
-11.7% test**, not 70/15/15. (`main` used a different rule, a pandas hash at
-60/20/20; on the same raw data about 26% of shared objects landed in different
-splits.)
-- Option A, in PR #13: keep the rule bit-for-bit. All existing results stay valid
-  and reproducible from the repo. Validation and test have fewer objects (612 and
-  508 on the full panel), so intervals are wider.
-- Option B: fix the bias with a proper 70/15/15 draw. Fairer shares, but the
-  objects in every split change, so every result and the test split are rerun.
-- `tests/test_splits.py` pins the shares, so changing the rule is a deliberate
-  decision, not an accident.
+**Decision 14 — Prediction-only decay records (Decision 7 vs the D3 panel).**
+The builder behind the D3 panel drops 156 of 44,029 junk objects (0.35%, about 153
+still in orbit) whose only decay record is a *Prediction* message, treating them as
+decayed. `main` keeps them as still in orbit, as Decision 7 requires.
+- Proposed: keep `main`'s rule. The difference is tiny, but say in the report that
+  the D3 panel is not exactly what `main` rebuilds.
+- Alternative: copy the other builder's behaviour so the panel reproduces exactly.
+  That contradicts Decision 7 and removes long-lived survivors.
+
+**Decision 15 — How to treat the test split.**
+An earlier notebook version already scored it and analysed its errors, so it is a
+development holdout, not an untouched final test. Options: state that caveat and
+make validation plus cross-validation the primary evidence, or draw a fresh blind
+holdout (which changes the split, see Decision 13). Needs an explicit team call.
+
+**Decision 16 — How to answer the Sun question.**
+Validation (2022) sits in one solar-activity tercile, so it cannot separate "the Sun
+does not help" from "this split never tested it". Options: use the time-ordered
+cross-validation inside training (PR #7) as the primary Sun test and state its
+limits, and/or start snapshots earlier (for example 2010) so training spans more
+solar conditions. The second changes the panel and means a rerun.
 
 ### Made (2026-11-17)
 
 | # | Decision | Reason |
 |---|---|---|
+| 13 | Object-to-split rule kept as is: first byte of SHA-256(`"20261021:<id>"`) % 100, cut at 70 and 85 (PR #13). Real shares are **76.6% train / 11.7% valid / 11.7% test**, not 70/15/15, because a byte runs 0–255 (modulo bias). | Every notebook and the Phase 4 results were computed on it, so changing it would redraw every split and rerun everything. The cost is fewer validation and test objects (612 and 508 on the full panel), so intervals are wider. `tests/test_splits.py` pins the shares, so changing the rule later is a deliberate decision. `main`'s old rule (pandas hash, 60/20/20) put about 26% of shared objects in different splits. Recorded 2026-11-17; confirm in review. |
 | 1 | Primary target: `reenters_within_horizon` (will it reenter within 365 days?). `log1p_days_remaining` stays in the panel as a secondary target but is not a headline result. | Every snapshot with a year of follow-up gets a label and objects that did not fall are included. It matches the game's shoot-or-skip decision, and the game needs no timer. A days-left label exists only for objects that have already fallen, so its test set fills with short-lived objects (old panel: 76% of test rows censored vs 29% of training rows). Recorded 2026-11-17; confirm in review of this PR. |
 
 ### Made (2026-10-21, on review of the original pipeline)
@@ -63,7 +71,7 @@ train/validation and test notebooks (PR #10, in `src/Models/`).
 | #7 | Phase 4 evaluation (`src/Models/evaluate.py`, results in `docs/results/`) | Changes requested: the object sampler must use the same eligibility filter as `fetch_gp_history.eligible_ids()`. |
 | #11 | Readable notebook result tables | Approved, open. |
 | #12 | `src/compare_panels.py`: diff two panel builds (counts only, no data rows) | Open. |
-| #13 | Object-to-split rule aligned with the D3 panel (Decision 13) | Draft, needs the team's decision. |
+| #13 | Object-to-split rule aligned with the D3 panel (Decision 13: keep the rule as is) | Draft, waiting on review. |
 | (none) | Branch `codex/plan-backblaze-panel-builder`: the Backblaze loader and builder | No PR yet. Built on pre-#8 `main`, conflicts in `build_dataset.py`, needs a rebase. |
 
 **Known gaps — read before trusting a number:**
