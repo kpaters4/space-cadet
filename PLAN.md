@@ -12,33 +12,18 @@ D3 Mon Nov 16 · D4 Mon Nov 23 · D5 Mon Nov 30 · D6 report Wed Dec 2 · demo D
 
 ### Open
 
-**Decision 14 — Prediction-only decay records (Decision 7 vs the D3 panel).**
-The builder behind the D3 panel drops 156 of 44,029 junk objects (0.35%, about 153
-still in orbit) whose only decay record is a *Prediction* message, treating them as
-decayed. `main` keeps them as still in orbit, as Decision 7 requires.
-- Proposed: keep `main`'s rule. The difference is tiny, but say in the report that
-  the D3 panel is not exactly what `main` rebuilds.
-- Alternative: copy the other builder's behaviour so the panel reproduces exactly.
-  That contradicts Decision 7 and removes long-lived survivors.
-
-**Decision 15 — How to treat the test split.**
-An earlier notebook version already scored it and analysed its errors, so it is a
-development holdout, not an untouched final test. Options: state that caveat and
-make validation plus cross-validation the primary evidence, or draw a fresh blind
-holdout (which changes the split, see Decision 13). Needs an explicit team call.
-
-**Decision 16 — How to answer the Sun question.**
-Validation (2022) sits in one solar-activity tercile, so it cannot separate "the Sun
-does not help" from "this split never tested it". Options: use the time-ordered
-cross-validation inside training (PR #7) as the primary Sun test and state its
-limits, and/or start snapshots earlier (for example 2010) so training spans more
-solar conditions. The second changes the panel and means a rerun.
+Nothing at the moment. Decisions 13–17 below keep what the team already built, and
+the report has to state their limits (see "Known gaps" further down).
 
 ### Made (2026-11-17)
 
 | # | Decision | Reason |
 |---|---|---|
-| 13 | Object-to-split rule kept as is: first byte of SHA-256(`"20261021:<id>"`) % 100, cut at 70 and 85 (PR #13). Real shares are **76.6% train / 11.7% valid / 11.7% test**, not 70/15/15, because a byte runs 0–255 (modulo bias). | Every notebook and the Phase 4 results were computed on it, so changing it would redraw every split and rerun everything. The cost is fewer validation and test objects (612 and 508 on the full panel), so intervals are wider. `tests/test_splits.py` pins the shares, so changing the rule later is a deliberate decision. `main`'s old rule (pandas hash, 60/20/20) put about 26% of shared objects in different splits. Recorded 2026-11-17; confirm in review. |
+| 13 | Object-to-split rule kept as is: first byte of SHA-256(`"20261021:<id>"`) % 100, cut at 70 and 85 (PR #13). Real shares are **76.6% train / 11.7% valid / 11.7% test**, not 70/15/15, because a byte runs 0–255 (modulo bias). | Every notebook and the Phase 4 results were computed on it, so changing it would redraw every split and rerun everything. The cost is fewer validation and test objects (612 and 508 on the full panel), so intervals are wider. `tests/test_splits.py` pins the shares, so changing the rule later is a deliberate decision. `main`'s old rule (pandas hash, 60/20/20) put about 26% of shared objects in different splits. Decided 2026-11-17. |
+| 14 | Prediction-only decay records: the D3 panel stays as built. Its builder drops 156 of 44,029 junk objects (0.35%, about 153 still in orbit) whose only decay record is a *Prediction* message. `build_dataset.py` on `main` keeps them as still in orbit (Decision 7). Both stay, and the report says the two differ by those objects. | Every result was computed on the D3 panel. The difference is tiny, but it removes some long-lived survivors, so the report should say so. |
+| 15 | Test split: stays as is, and is reported as a development holdout, not an untouched final test. Validation and cross-validation are the primary evidence. | An earlier notebook version already scored it and analysed its errors. Redrawing it would change the split (Decision 13). |
+| 16 | Sun question: the panel is not changed. The time-ordered cross-validation inside training (PR #7) is the primary Sun test, reported as "no clear effect yet", with its limits stated. | Validation (2022) sits in one solar-activity tercile, so it cannot separate "the Sun does not help" from "this split never tested it". Starting snapshots earlier (for example 2010) would help but means a rerun. |
+| 17 | Builders: Jonathan's Backblaze builder (`build_plan_dataset.py`, `b2_storage.py`) stays its own script and is committed after a rebase onto `main`. `build_dataset.py` stays the PLAN reference builder. | The D3 panel came from the Backblaze builder, and the full `gp_history` does not fit on most laptops, so the separate path is needed. Requested before it merges: fix the local-mode crash and remove the hard-coded personal path. |
 | 1 | Primary target: `reenters_within_horizon` (will it reenter within 365 days?). `log1p_days_remaining` stays in the panel as a secondary target but is not a headline result. | Every snapshot with a year of follow-up gets a label and objects that did not fall are included. It matches the game's shoot-or-skip decision, and the game needs no timer. A days-left label exists only for objects that have already fallen, so its test set fills with short-lived objects (old panel: 76% of test rows censored vs 29% of training rows). Decided 2026-11-17. |
 
 ### Made (2026-10-21, on review of the original pipeline)
