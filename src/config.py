@@ -25,7 +25,7 @@ MAX_PERIGEE_KM = 1000.0
 # Observation epochs sampled per object for the days-remaining panel.
 EPOCHS_PER_OBJECT = 12
 
-# Trailing windows (days) used for space weather features.
+# Trailing windows (days) used for space    weather features.
 TRAILING_WINDOWS = (1, 3, 7, 27, 81, 365)
 
 # Objects whose decay predates reliable daily space weather are dropped.
