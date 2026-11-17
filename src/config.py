@@ -76,4 +76,16 @@ VALID_YEARS = (2022, 2022)
 TEST_FROM_YEAR = 2024
 # Each OBJECT is assigned to exactly one split by a seeded hash of its id, then
 # contributes only snapshots inside that split's window (object-disjoint splits).
-SPLIT_FRACTIONS = {"train": 0.60, "valid": 0.20, "test": 0.20}
+#
+# The rule (see build_dataset.assign_object_splits) takes the first byte of
+# SHA-256("<SPLIT_SEED>:<norad_cat_id>") % 100 and cuts it at SPLIT_CUTS:
+#   value < 70 -> train, 70 <= value < 85 -> valid, otherwise test.
+# It is the rule behind the panel the D3 results were computed on, kept
+# bit-for-bit so that panel can be reproduced from this repo.
+# CAUTION: a byte runs 0-255, so values 0-55 occur three times and 56-99 twice
+# (modulo bias). The real shares are 196/256 = 76.6% train, 11.7% valid,
+# 11.7% test -- NOT 70/15/15. Changing this rule changes which objects land in
+# which split, so every result would have to be rerun (tests/test_splits.py
+# fails loudly if the shares move).
+SPLIT_SEED = 20261021
+SPLIT_CUTS = (70, 85)

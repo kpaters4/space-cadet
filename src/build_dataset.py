@@ -45,6 +45,7 @@ Leakage warnings, read before trusting a score
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -66,11 +67,11 @@ from config import (
     PANEL,
     PERIGEE_DECAY_WINDOW_DAYS,
     PROCESSED,
-    RANDOM_SEED,
     SATCAT,
     SNAPSHOT_MAX_PERIGEE_KM,
     SNAPSHOT_START,
-    SPLIT_FRACTIONS,
+    SPLIT_CUTS,
+    SPLIT_SEED,
     SW_ALL,
     TEST_FROM_YEAR,
     TRAIN_YEARS,
@@ -323,13 +324,18 @@ def monthly_snapshots(objects: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame
     return grid[["norad_cat_id", "epoch_index", "obs_date"]].reset_index(drop=True)
 
 
+def split_of_id(norad_id: int) -> str:
+    """Split for one object: first byte of SHA-256("<SPLIT_SEED>:<id>") % 100, cut at
+    SPLIT_CUTS. Depends only on the id and the seed, so adding objects never
+    reshuffles existing ones. This is the rule behind the D3 panel (see config.py
+    for why its real shares are 76.6 / 11.7 / 11.7 and not 70 / 15 / 15)."""
+    value = hashlib.sha256(f"{SPLIT_SEED}:{int(norad_id)}".encode()).digest()[0] % 100
+    return "train" if value < SPLIT_CUTS[0] else "valid" if value < SPLIT_CUTS[1] else "test"
+
+
 def assign_object_splits(ids: pd.Series) -> pd.Series:
-    """Seeded, per-object split draw: hash of (id, seed), independent of which
-    other objects are present, so adding objects never reshuffles existing ones."""
-    h = pd.util.hash_array(ids.to_numpy().astype("uint64") + np.uint64(RANDOM_SEED))
-    u = h / np.float64(2**64)
-    edges = np.cumsum([SPLIT_FRACTIONS["train"], SPLIT_FRACTIONS["valid"]])
-    return pd.Series(np.select([u < edges[0], u < edges[1]], ["train", "valid"], "test"), index=ids.index)
+    """Seeded, per-object split assignment (object-disjoint splits)."""
+    return ids.map(split_of_id)
 
 
 def in_split_window(split: pd.Series, obs_date: pd.Series) -> pd.Series:
