@@ -62,7 +62,9 @@ def tidy_daily(daily: pd.DataFrame) -> pd.DataFrame:
     # Mark reconstructed days before filling so they stay auditable.
     out["is_gap_filled"] = out["source"].isna()
     numeric = out.select_dtypes("number").columns
-    out[numeric] = out[numeric].interpolate(limit_direction="both")
+    # Forward-fill only: two-sided interpolation would borrow values from after
+    # the gap, i.e. from the future of the days being filled (PLAN Decision 8).
+    out[numeric] = out[numeric].ffill()
     out["source"] = out["source"].fillna("GAP")
     return out.reset_index()
 
@@ -106,6 +108,8 @@ def tidy_monthly_forecast(monthly: pd.DataFrame) -> pd.DataFrame:
 def build(path=SW_ALL) -> tuple[pd.DataFrame, pd.DataFrame]:
     raw = load_raw(path)
     daily_raw, monthly_raw = split_cadence(raw)
+    # Observed days only: "PRD" rows are predictions, not observations.
+    daily_raw = daily_raw[daily_raw["F10.7_DATA_TYPE"].str.strip().str.upper().isin(["OBS", "INT"])]
     daily = add_trailing_features(tidy_daily(daily_raw))
     daily = daily[daily["date"] >= pd.Timestamp(MIN_EPOCH)]
     return daily, tidy_monthly_forecast(monthly_raw)

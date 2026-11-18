@@ -37,26 +37,48 @@ import argparse
 import sys
 import time
 
+import numpy as np
+
 from build_dataset import build_objects, load_decay, load_satcat
-from config import DECAY, GP_HISTORY, MAX_PERIGEE_KM, MIN_EPOCH, SATCAT
+from config import DECAY, GP_HISTORY, GP_MAX_OBJECTS, MAX_PERIGEE_KM, MIN_EPOCH, RANDOM_SEED, SATCAT
 from fetch_spacetrack import download, login
 
 BASE = "https://www.space-track.org"
 CHUNK_SIZE = 300          # NORAD_CAT_IDs per request; keeps the URL a sane length
 SLEEP_BETWEEN_REQUESTS_S = 3.0
 
+# Snapshots start 2015-01-01 and need an element set up to 30 days old, so
+# element sets before this are never used. Filtering server-side keeps each
+# object's download to its 2014+ history instead of its whole life.
+GP_EPOCH_FROM = "2014-11-01"
+SNAPSHOT_START = "2015-01-01"
+JUNK_TYPES = ("DEBRIS", "ROCKET BODY", "R/B", "TBA", "UNKNOWN")
 
-def eligible_ids() -> list[int]:
-    """Same filter build_dataset.py uses to decide which objects enter the panel."""
+
+def eligible_ids(limit: int | None = None) -> list[int]:
+    """Junk objects that were in orbit at some point during the snapshot window.
+
+    Same perigee/launch filter build_dataset.py uses, plus: junk object types
+    only, and not already decayed before the first snapshot. If `limit` is set,
+    a seeded random sample of that size (NOT the first N ids, which would be
+    the oldest objects and mostly decayed long before 2015).
+    """
     satcat = load_satcat(SATCAT)
     decay = load_decay(DECAY)
     import pandas as pd
 
     objects = build_objects(satcat, decay, pd.Timestamp.utcnow().tz_localize(None))
     eligible = objects[
-        objects["perigee_km"].le(MAX_PERIGEE_KM) & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
+        objects["perigee_km"].le(MAX_PERIGEE_KM)
+        & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
+        & objects["object_type"].isin(JUNK_TYPES)
+        & (objects["decay_date"].isna() | objects["decay_date"].ge(pd.Timestamp(SNAPSHOT_START)))
     ]
-    return sorted(int(x) for x in eligible["norad_cat_id"].dropna().unique())
+    ids = sorted(int(x) for x in eligible["norad_cat_id"].dropna().unique())
+    if limit and limit < len(ids):
+        rng = np.random.default_rng(RANDOM_SEED)
+        ids = sorted(int(x) for x in rng.choice(ids, size=limit, replace=False))
+    return ids
 
 
 def chunks(seq: list[int], size: int):
@@ -67,7 +89,8 @@ def chunks(seq: list[int], size: int):
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--limit", type=int, default=None, help="only fetch the first N eligible objects (testing)"
+        "--limit", type=int, default=GP_MAX_OBJECTS,
+        help="fetch a seeded random sample of N eligible objects (default: GP_MAX_OBJECTS; 0 = all)"
     )
     ap.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     ap.add_argument(
@@ -79,9 +102,7 @@ def main(argv: list[str] | None = None) -> None:
         if not path.exists():
             sys.exit(f"missing {path} -- run `python src/fetch_spacetrack.py` first")
 
-    ids = eligible_ids()
-    if args.limit:
-        ids = ids[: args.limit]
+    ids = eligible_ids(args.limit or None)
     if not ids:
         sys.exit("no eligible objects found (check MAX_PERIGEE_KM / MIN_EPOCH in config.py)")
     print(f"{len(ids):,} eligible objects (perigee <= {MAX_PERIGEE_KM:.0f} km, "
@@ -99,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
             id_list = ",".join(str(n) for n in batch)
             url = (
                 f"{BASE}/basicspacedata/query/class/gp_history/NORAD_CAT_ID/{id_list}"
-                f"/orderby/NORAD_CAT_ID,EPOCH asc/format/csv"
+                f"/EPOCH/>{GP_EPOCH_FROM}/orderby/NORAD_CAT_ID,EPOCH asc/format/csv"
             )
             print(f"  batch {i}/{len(batches)} ({len(batch)} objects) ...", flush=True)
             tmp = GP_HISTORY.with_suffix(f".part{i}")
