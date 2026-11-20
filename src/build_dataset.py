@@ -63,6 +63,7 @@ from config import (
     INCLUDE_FORWARD_SW,
     JUNK_TYPES,
     MAX_ELEMENT_AGE_DAYS,
+    MAX_PERIGEE_KM,
     MIN_EPOCH,
     OBJECTS,
     PANEL,
@@ -173,21 +174,43 @@ def load_decay(path=DECAY) -> pd.DataFrame:
     return out[[c for c in wanted if c in out.columns]].reset_index()
 
 
+def eligible_junk_ids(objects: pd.DataFrame) -> pd.Series:
+    """Junk objects that could ever actually appear in the panel.
+
+    Junk type, launched on or after MIN_EPOCH, perigee low enough to plausibly
+    decay (<= MAX_PERIGEE_KM), and not already gone before the snapshot window
+    even opens -- an object that burned up in 1990 can never appear in a 2015+
+    snapshot, so there is no point spending sample budget or a fetch request on
+    it. This is the single definition of "eligible" shared with
+    fetch_gp_history.eligible_ids(): that script decides which objects to
+    download gp_history for, this one decides which of those to sample from
+    when the file is too large to read whole, and if the two filters drifted
+    apart, sampling could pick objects the fetch never covered in the first
+    place (see PR #7 review: this used to be a looser, separately-maintained
+    copy of the same filter, and had drifted).
+    """
+    return (
+        objects.loc[
+            objects["perigee_km"].le(MAX_PERIGEE_KM)
+            & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
+            & objects["object_type"].isin(JUNK_TYPES)
+            & (objects["decay_date"].isna() | objects["decay_date"].ge(pd.Timestamp(SNAPSHOT_START))),
+            "norad_cat_id",
+        ]
+        .dropna()
+        .astype("int64")
+    )
+
+
 def sample_eligible_object_ids(
     objects: pd.DataFrame, max_objects: int | None, rng
 ) -> tuple[set[int], dict]:
     """Which objects gp_history actually needs to cover, for this run.
 
-    Uses the same eligibility test build_panel() applies before generating
-    snapshots (junk type, launched on or after MIN_EPOCH), so the objects
-    gp_history is read for are exactly the ones that can appear in the panel.
     `max_objects=None` keeps every eligible object -- only safe if
     gp_history.csv fits in memory whole.
     """
-    eligible = objects.loc[
-        objects["object_type"].isin(JUNK_TYPES) & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH)),
-        "norad_cat_id",
-    ].dropna().astype("int64")
+    eligible = eligible_junk_ids(objects)
     info = {"eligible_objects": int(eligible.nunique())}
 
     if max_objects is None or eligible.nunique() <= max_objects:
