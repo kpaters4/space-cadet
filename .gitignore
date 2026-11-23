@@ -230,3 +230,6 @@ data/sample_out/
 
 # macOS
 .DS_Store
+
+# API model artifact: derived from Space-Track data, rebuilt by src/Models/build_api_pipeline.py
+api/pipeline.joblib

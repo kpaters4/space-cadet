@@ -1,0 +1,98 @@
+{
+  "info": {
+    "name": "Space Cadet reentry API",
+    "description": "D5 checks for the deployed Modal API. Set the collection variable baseUrl to the Modal URL (no trailing slash), then run the collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://YOUR-WORKSPACE--space-cadet-reentry-api-fastapi-app.modal.run" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health" },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "const body = pm.response.json();",
+          "pm.test('service is ok', () => pm.expect(body.status).to.eql('ok'));",
+          "pm.test('pipeline artifact is loaded', () => pm.expect(body.loaded).to.eql(true));"
+        ]}
+      }]
+    },
+    {
+      "name": "Pipeline info",
+      "request": { "method": "GET", "url": "{{baseUrl}}/pipeline-info" },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "const body = pm.response.json();",
+          "pm.test('reports the scikit-learn version', () => pm.expect(body.sklearn_version).to.be.a('string').and.not.empty);",
+          "pm.test('names the custom transformer', () => pm.expect(body.custom_transformer).to.include('OrbitFeatureBuilder'));",
+          "pm.test('lists pipeline steps', () => pm.expect(body.steps).to.eql(['features', 'encode', 'model']));",
+          "pm.test('has a validation-locked threshold', () => pm.expect(body.threshold).to.be.within(0, 1));",
+          "pm.test('lists the input fields', () => pm.expect(body.input_fields.numeric).to.include('perigee_km'));"
+        ]}
+      }]
+    },
+    {
+      "name": "Predict - valid request",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/predict",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"perigee_km\": 380,\n  \"apogee_km\": 420,\n  \"perigee_km_30d_ago\": 392,\n  \"inclination_deg\": 51.6,\n  \"bstar\": 0.0004,\n  \"object_type\": \"DEBRIS\",\n  \"rcs_size\": \"SMALL\",\n  \"age_days\": 1200,\n  \"f107_81d_mean\": 150,\n  \"ap_27d_mean\": 12\n}" }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "const body = pm.response.json();",
+          "pm.test('probability is between 0 and 1', () => pm.expect(body.probability).to.be.within(0, 1));",
+          "pm.test('model call is a boolean', () => pm.expect(body.reenters_within_365d).to.be.a('boolean'));",
+          "pm.test('call matches the threshold', () => pm.expect(body.reenters_within_365d).to.eql(body.probability >= body.threshold));",
+          "pm.test('includes the physics baseline', () => pm.expect(body.physics_baseline.reenters_within_365d).to.be.a('boolean'));",
+          "pm.test('baseline days to 120 km = (380-120)/0.4', () => pm.expect(body.physics_baseline.days_to_120km).to.be.closeTo(650, 0.5));",
+          "pm.test('reports a model version', () => pm.expect(body.model_version).to.be.a('string').and.not.empty);"
+        ]}
+      }]
+    },
+    {
+      "name": "Predict - invalid input (422)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/predict",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"perigee_km\": 50,\n  \"apogee_km\": 40,\n  \"perigee_km_30d_ago\": 392,\n  \"inclination_deg\": 51.6,\n  \"bstar\": 0.0004,\n  \"object_type\": \"SATELLITE\",\n  \"rcs_size\": \"SMALL\",\n  \"age_days\": 1200,\n  \"f107_81d_mean\": 150,\n  \"ap_27d_mean\": 12\n}" }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 422', () => pm.response.to.have.status(422));",
+          "const body = pm.response.json();",
+          "const fields = body.detail.map(d => d.loc[d.loc.length - 1]);",
+          "pm.test('flags perigee_km as out of range', () => pm.expect(fields).to.include('perigee_km'));",
+          "pm.test('flags object_type as not allowed', () => pm.expect(fields).to.include('object_type'));"
+        ]}
+      }]
+    },
+    {
+      "name": "Predict - missing field (422)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/predict",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"perigee_km\": 380,\n  \"apogee_km\": 420\n}" }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 422', () => pm.response.to.have.status(422));",
+          "pm.test('names the missing fields', () => pm.expect(pm.response.json().detail.some(d => d.type === 'missing')).to.eql(true));"
+        ]}
+      }]
+    }
+  ]
+}
