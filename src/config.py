@@ -53,8 +53,15 @@ HORIZON_DAYS = 365
 # object as decayed. Real msg_type values seen in the first pull: Historical, Prediction.
 DECAY_ACTUAL_MSG_TYPES = ("historical",)
 
-# gp_history pull size: test small first, then raise (resumable pull).
-GP_MAX_OBJECTS = 500
+# gp_history.csv is a full orbital-element history export and can be tens of
+# GB -- too big to read in one pd.read_csv on a laptop. This sets both: how
+# many objects fetch_gp_history.py pulls per resumable run, and how many
+# eligible objects build_dataset.py's chunked load_gp_history() samples and
+# streams when building the panel (see sample_eligible_object_ids). Test
+# small first, then raise; None reads every object's history (needs a
+# machine that can hold it).
+GP_MAX_OBJECTS: int | None = 500
+GP_CHUNKSIZE = 500_000
 
 # Forward-looking solar means need a forecast at prediction time -- off.
 INCLUDE_FORWARD_SW = False

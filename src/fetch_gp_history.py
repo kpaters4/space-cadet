@@ -39,7 +39,7 @@ import time
 
 import numpy as np
 
-from build_dataset import build_objects, load_decay, load_satcat
+from build_dataset import build_objects, eligible_junk_ids, load_decay, load_satcat
 from config import DECAY, GP_HISTORY, GP_MAX_OBJECTS, MAX_PERIGEE_KM, MIN_EPOCH, RANDOM_SEED, SATCAT
 from fetch_spacetrack import download, login
 
@@ -51,30 +51,25 @@ SLEEP_BETWEEN_REQUESTS_S = 3.0
 # element sets before this are never used. Filtering server-side keeps each
 # object's download to its 2014+ history instead of its whole life.
 GP_EPOCH_FROM = "2014-11-01"
-SNAPSHOT_START = "2015-01-01"
-JUNK_TYPES = ("DEBRIS", "ROCKET BODY", "R/B", "TBA", "UNKNOWN")
 
 
 def eligible_ids(limit: int | None = None) -> list[int]:
     """Junk objects that were in orbit at some point during the snapshot window.
 
-    Same perigee/launch filter build_dataset.py uses, plus: junk object types
-    only, and not already decayed before the first snapshot. If `limit` is set,
-    a seeded random sample of that size (NOT the first N ids, which would be
-    the oldest objects and mostly decayed long before 2015).
+    Uses build_dataset.eligible_junk_ids() -- the one shared definition of
+    "eligible" -- so the objects fetched here and the objects
+    build_dataset.py's sample_eligible_object_ids() samples from when reading
+    this file back never drift apart (they used to: this used to carry its
+    own separately-maintained copy of the filter, see PR #7 review). If
+    `limit` is set, a seeded random sample of that size (NOT the first N ids,
+    which would be the oldest objects and mostly decayed long before 2015).
     """
     satcat = load_satcat(SATCAT)
     decay = load_decay(DECAY)
     import pandas as pd
 
     objects = build_objects(satcat, decay, pd.Timestamp.utcnow().tz_localize(None))
-    eligible = objects[
-        objects["perigee_km"].le(MAX_PERIGEE_KM)
-        & objects["launch_date"].ge(pd.Timestamp(MIN_EPOCH))
-        & objects["object_type"].isin(JUNK_TYPES)
-        & (objects["decay_date"].isna() | objects["decay_date"].ge(pd.Timestamp(SNAPSHOT_START)))
-    ]
-    ids = sorted(int(x) for x in eligible["norad_cat_id"].dropna().unique())
+    ids = sorted(int(x) for x in eligible_junk_ids(objects).unique())
     if limit and limit < len(ids):
         rng = np.random.default_rng(RANDOM_SEED)
         ids = sorted(int(x) for x in rng.choice(ids, size=limit, replace=False))
