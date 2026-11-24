@@ -1,0 +1,6 @@
+model,pr_auc,brier,roc_auc,recall_at_10pct_far,pr_auc_ci95,brier_ci95,roc_auc_ci95,recall_at_10pct_far_ci95,valid_rows,valid_objects,note
+base_rate,0.308,0.2784,0.5,0.1,"[0.273, 0.343]","[0.247, 0.310]","[0.500, 0.500]","[0.100, 0.100]",4740,588,baseline: training positive rate
+physics_decay,0.4314,0.2712,0.6149,0.3145,"[0.394, 0.471]","[0.241, 0.303]","[0.599, 0.633]","[0.285, 0.348]",4740,588,baseline: perigee reaches 120 km within 365 days at the 30-day descent rate
+logistic,0.876,0.1222,0.933,0.8055,"[0.844, 0.906]","[0.106, 0.140]","[0.917, 0.949]","[0.749, 0.856]",4740,588,serving candidate (9 API fields)
+hist_gb,0.9608,0.0881,0.9789,0.9411,"[0.947, 0.972]","[0.074, 0.104]","[0.971, 0.985]","[0.913, 0.964]",4740,588,serving candidate (9 API fields)
+hist_gb_full_panel,0.9465,0.0807,0.9748,0.9219,"[0.926, 0.964]","[0.067, 0.095]","[0.967, 0.982]","[0.894, 0.948]",4740,588,"REFERENCE ONLY: D3-style, 20 panel columns, not servable"
