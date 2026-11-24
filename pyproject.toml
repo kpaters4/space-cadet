@@ -7,5 +7,15 @@ dependencies = [
     "pandas>=2.2",
     "numpy>=1.26",
     "requests>=2.31",
-    "scikit-learn>=1.4",
+    "scikit-learn>=1.7.2",
+    "joblib>=1.6.0",
+    "fastapi>=0.162.5",
+    "pydantic>=2",
+    "uvicorn>=0.54.0",
+    "modal>=1.6.4",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
 ]

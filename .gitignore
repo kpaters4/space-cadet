@@ -230,3 +230,6 @@ data/sample_out/
 
 # macOS
 .DS_Store
+
+# trained model artifacts (derived from Space-Track data; whether to track them is a team decision)
+artifacts/
